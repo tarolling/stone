@@ -1,0 +1,22 @@
+// flags packed into one int, one bit each
+READ = 0b001
+WRITE = 0b010
+RUN = 0b100
+
+fn describe(mode: int) -> str:
+    text = ""
+    for flag, letter in [(READ, "r"), (WRITE, "w"), (RUN, "x")]:
+        if mode & flag != 0:
+            text += letter
+        else:
+            text += "-"
+    ret text
+
+mode = READ | WRITE
+print(describe(mode), describe(mode ^ RUN), describe(mode & ~WRITE))
+
+// the bytes of a 32-bit number, lowest first
+n = 0xcafe_f00d
+print([0, 8, 16, 24].map(|shift| (n >> shift) & 0xff))
+print("{n:#x} {n:#b}")
+print(1 << 10, -20 >> 2, 6 & 3, 6 | 3, 6 ^ 3, ~6)

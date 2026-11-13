@@ -14,7 +14,7 @@ prints
 
 | type | examples | notes |
 | --- | --- | --- |
-| `int` | `0`, `42`, `-7` | 64-bit signed; overflow wraps, but dividing `MIN` by `-1` is an error |
+| `int` | `0`, `42`, `-7`, `0xff`, `1_000` | 64-bit signed; overflow wraps, but dividing `MIN` by `-1` and shifting bits off the top with `<<` are errors |
 | `float` | `2.5`, `1e16`, `0.1` | IEEE 754 double |
 | `bool` | `true`, `false` | |
 | `str` | `"hello"`, `"a\tb\n"` | double quotes only, cannot span lines; `\n`, `\"`, and other escapes |
@@ -51,6 +51,31 @@ before it, so `2 ** 3 ** 2` is `512` and `-2 ** 2` is `-4`.
 Each operator also updates a variable in place: `count += 1` is `count = count + 1`, and `-=`,
 `*=`, `/=`, `%=`, and `**=` work the same way, on list elements too, as in `scores[i] *= 2`.
 See [augmented assignment](../reference/syntax.md#augmented-assignment).
+
+## Bits
+
+Ints also work as 64 bits of two's complement, with Python's bitwise operators: `&` keeps the
+bits set in both sides, `|` those set in either, `^` those set in exactly one, `~x` flips every
+bit (so it is `-x - 1`), and `x << n` and `x >> n` move the bits `n` places, which is
+multiplying or dividing by `2 ** n`, rounding down. Ints can be written in hexadecimal, octal,
+or binary, and any number may have `_` between its digits to make it easier to read:
+
+```{literalinclude} ../examples/bits.stn
+:language: stone
+```
+
+prints
+
+```{literalinclude} ../examples/bits.out
+:language: text
+```
+
+These operators bind looser than arithmetic and tighter than comparisons, so `mode & flag != 0`
+means `(mode & flag) != 0`. On two bools, `&`, `|`, and `^` give a bool, evaluating both sides
+where `and` and `or` may stop after the first. A shift count must be from 0 to 63, and a `<<`
+whose result does not fit in an int stops the program with `integer overflow in shift`, so
+`1 << 62` is fine but `1 << 63` is not, where `+` and `*` would wrap around. They also update a
+variable in place, as `flags |= WRITE` does.
 
 ## Strings
 

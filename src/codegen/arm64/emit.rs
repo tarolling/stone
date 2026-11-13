@@ -12,7 +12,7 @@
 //! makes, so `sp` never moves in the body and every slot is addressed from it.
 
 use super::{ARG_REGS, Arm64Generator, pop_frame, push_frame};
-use crate::codegen::asm::arm64::float_imm;
+use crate::codegen::asm::arm64::{float_imm, logical_imm};
 use crate::codegen::context::{
     FALLIBLE_ROUTINES, REDUCE_PIO2, function_label, function_static, global_label, variant_label,
 };
@@ -532,9 +532,19 @@ impl Arm64Generator {
                     }
                     (BinOp::Add, false) => "add",
                     (BinOp::Sub, false) => "sub",
+                    (BinOp::And, false) => "and",
+                    (BinOp::Or, false) => "orr",
+                    (BinOp::Xor, false) => "eor",
                     _ => return Err(format!("{op:?} cannot be packed")),
                 };
-                self.emit(&format!("\t{mnemonic}\tv{dst}.2d, v{lhs}.2d, v{rhs}.2d"));
+                // the bitwise operations take whole registers of bytes
+                let lanes = match op {
+                    BinOp::And | BinOp::Or | BinOp::Xor => "16b",
+                    _ => "2d",
+                };
+                self.emit(&format!(
+                    "\t{mnemonic}\tv{dst}.{lanes}, v{lhs}.{lanes}, v{rhs}.{lanes}"
+                ));
                 if rhs_owned {
                     packing.give(rhs);
                 }
@@ -599,6 +609,9 @@ impl Arm64Generator {
                     (BinOp::Sub, false) => "sub",
                     // SVE2's, which wraps as stone's ints do
                     (BinOp::Mul, false) => "mul",
+                    (BinOp::And, false) => "and",
+                    (BinOp::Or, false) => "orr",
+                    (BinOp::Xor, false) => "eor",
                     _ => return Err(format!("{op:?} cannot be packed")),
                 };
                 let dst = match (lhs_owned, rhs_owned) {
@@ -1102,7 +1115,11 @@ impl Arm64Generator {
                 let (dst, mut lhs, mut rhs) =
                     (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
                 // `a + b` is `b + a`, so an immediate can go second, where `add` takes it
-                if matches!(op, BinOp::Add | BinOp::Mul) && matches!(lhs, Value::Imm(_)) {
+                if matches!(
+                    op,
+                    BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or | BinOp::Xor
+                ) && matches!(lhs, Value::Imm(_))
+                {
                     std::mem::swap(&mut lhs, &mut rhs);
                 }
                 let target = self.target(dst);
@@ -1112,6 +1129,11 @@ impl Arm64Generator {
                     BinOp::Add => "add",
                     BinOp::Sub => "sub",
                     BinOp::Mul => "mul",
+                    BinOp::And => "and",
+                    BinOp::Or => "orr",
+                    BinOp::Xor => "eor",
+                    BinOp::Shl => "lsl",
+                    BinOp::Shr => "asr",
                     BinOp::DivUnchecked => return Err("int division is always checked".to_string()),
                     BinOp::Div | BinOp::Rem | BinOp::Pow => {
                         return Err(format!("{op:?} is emitted separately"));
@@ -1133,6 +1155,14 @@ impl Arm64Generator {
                     (BinOp::Add | BinOp::Sub, Value::Imm(n)) if n != i64::MIN && fits_arith(-n) => {
                         let flipped = if *op == BinOp::Add { "sub" } else { "add" };
                         self.emit(&format!("\t{flipped}\t{target}, {left}, #{}", -n));
+                    }
+                    (BinOp::Xor, Value::Imm(-1)) => self.emit(&format!("\tmvn\t{target}, {left}")),
+                    (BinOp::And | BinOp::Or | BinOp::Xor, Value::Imm(n)) if logical_imm(n) => {
+                        self.emit(&format!("\t{name}\t{target}, {left}, #{n}"));
+                    }
+                    // the processor takes a count's low 6 bits, as `BinOp::Shl` does
+                    (BinOp::Shl | BinOp::Shr, Value::Imm(n)) => {
+                        self.emit(&format!("\t{name}\t{target}, {left}, #{}", n & 63));
                     }
                     _ => {
                         let right = self.operand(rhs, "x11");

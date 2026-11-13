@@ -1,0 +1,5 @@
+fn shift(xs: list[int], n: int) -> list[int]:
+    ret xs << n
+
+print(shift([1, 2], 3))
+print(shift([1, 2], 64))

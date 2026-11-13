@@ -352,7 +352,8 @@ impl ord for Version:
             ret self.major.cmp(other.major)
         ret self.minor.cmp(other.minor)
 
-// operators call the prelude's traits add, sub, mul, div, rem, and neg
+// operators call the prelude's traits add, sub, mul, div, rem, neg, bitand, bitor, bitxor, shl,
+// shr, and invert
 impl add[Version] for Version:
     fn add(self, other: Version) -> Self:
         ret Version(major=self.major + other.major, minor=self.minor + other.minor)
@@ -516,6 +517,11 @@ assign the result where 'add' is called
   `-7 % 2 == -1`. There is no `//`; that starts a comment.
 - `**` takes an `int` exponent, which cannot be negative on an int: use `2.0 ** -1`, and
   `math.sqrt` for square roots.
+- `&`, `|`, `^`, `~`, `<<`, and `>>` work on ints as in Python, with Python's precedence
+  (`a & b == c` is `(a & b) == c`), and `&`, `|`, `^` on two bools give a bool without
+  short-circuiting. A shift count must be from 0 to 63, and `<<` fails when the result does not
+  fit in an int (`1 << 63` fails; `+` and `*` wrap instead). Ints may be written `0xff`, `0o17`,
+  `0b1010`, and `1_000_000`.
 - Arithmetic on lists is element by element, as in numpy: `[1, 2] * 2` is `[2, 4]`,
   `[1.0, 2.0] + [3.0, 4.0]` is `[4.0, 6.0]`. So `[0] * n` is not `n` zeros (the checker warns),
   and `+` does not join lists; use `extend`.
@@ -553,7 +559,7 @@ assign the result where 'add' is called
 | `d.pop(k)`, `d.pop(k, default)` | `d.pop(k)` returns an option: `.unwrap_or(default)` |
 | `del d[k]` | `d.pop(k)` as a statement |
 | `set()`, `{1, 2}`, `s.add(x)`, `s.discard(x)` | `{}`, `{1, 2}`, `s.add(x)`, `s.remove(x)` (which returns whether it was there); a `set[T]` of ints, strings, or bools keeps insertion order |
-| `a \| b`, `a & b`, `a - b`, `a <= b` | `a.union(b)`, `a.intersection(b)`, `a.difference(b)`, `a.is_subset(b)` (no set operators) |
+| `a \| b`, `a & b`, `a - b`, `a <= b` on sets | `a.union(b)`, `a.intersection(b)`, `a.difference(b)`, `a.is_subset(b)` (no set operators; `\|` and `&` are for ints and bools) |
 | `def f(x, n=1)`, `f(n=2)` | every argument, positionally (only structs take names) |
 | `lambda x: x * 2` | `\|x\| x * 2`; a lambda may read variables around it, as copies taken where it is written |
 | `map(f, xs)`, `filter(f, xs)`, `any`/`all` with a generator | `xs.map(f)`, `xs.filter(f)`, `xs.any(f)`, `xs.all(f)` |

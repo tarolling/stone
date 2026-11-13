@@ -954,20 +954,22 @@ fn builtin_operand(function: &str, receiver: &Value) -> bool {
         .is_some_and(|(trait_, _)| checker::OPERATOR_TRAITS.contains(&trait_))
         && matches!(
             receiver,
-            Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Bytes(_)
+            Value::Int(_) | Value::Float(_) | Value::Bool(_) | Value::Str(_) | Value::Bytes(_)
         )
 }
 
 /// Computes the operator trait method `function`, such as `add.add`, on `values`, the receiver
 /// first, as the builtin operation, for a receiver that [`builtin_operand`] accepts.
 ///
-/// For example, `add.add` on 2 and 3 gives 5, and `neg.neg` on 2.5 gives -2.5.
+/// For example, `add.add` on 2 and 3 gives 5, `neg.neg` on 2.5 gives -2.5, and `invert.invert`
+/// on 5 gives -6.
 fn builtin_operator(function: &str, values: &[Value]) -> EvalResult<Value> {
     let trait_ = function
         .split_once('.')
         .map_or(function, |(trait_, _)| trait_);
     match (checker::trait_operator(trait_), values) {
         (Some(op), [left, right]) => binary(op, left.clone(), right.clone()),
+        (None, [value]) if trait_ == checker::INVERT => unary(UnaryOp::Invert, value.clone()),
         (None, [value]) => unary(UnaryOp::UnarySub, value.clone()),
         _ => Err(format!("'{function}' takes the wrong values").into()),
     }
@@ -1018,7 +1020,18 @@ fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
             Operator::Modulo if r == 0 => Err("division by zero".into()),
             // `MIN % -1` is 0, which compiled code also gives
             Operator::Modulo => Ok(Value::Int(l.wrapping_rem(r))),
+            Operator::BitAnd => Ok(Value::Int(l & r)),
+            Operator::BitOr => Ok(Value::Int(l | r)),
+            Operator::BitXor => Ok(Value::Int(l ^ r)),
+            Operator::LShift => Ok(Value::Int(stdlib::shift_left(l, r)?)),
+            Operator::RShift => Ok(Value::Int(stdlib::shift_right(l, r)?)),
             Operator::Power => Err("Type mismatch in binary operation".into()),
+        },
+        (Value::Bool(l), Value::Bool(r)) => match op {
+            Operator::BitAnd => Ok(Value::Bool(l & r)),
+            Operator::BitOr => Ok(Value::Bool(l | r)),
+            Operator::BitXor => Ok(Value::Bool(l ^ r)),
+            _ => Err("Type mismatch in binary operation".into()),
         },
         (Value::Float(l), Value::Float(r)) => match op {
             Operator::Add => Ok(Value::Float(l + r)),
@@ -1029,7 +1042,7 @@ fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
             Operator::Divide => Ok(Value::Float(l / r)),
             Operator::Modulo if r == 0.0 => Err("division by zero".into()),
             Operator::Modulo => Ok(Value::Float(l % r)),
-            Operator::Power => Err("Type mismatch in binary operation".into()),
+            _ => Err("Type mismatch in binary operation".into()),
         },
         (Value::Bytes(l), Value::Bytes(r)) if matches!(op, Operator::Add) => {
             Ok(Value::Bytes([&l[..], &r[..]].concat().into()))
@@ -1050,6 +1063,7 @@ fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
             Value::Float(x) => Ok(Value::Float(-x)),
             other => Ok(Value::Int(other.as_int()?.wrapping_neg())),
         },
+        UnaryOp::Invert => Ok(Value::Int(!value.as_int()?)),
     }
 }
 
@@ -2035,14 +2049,15 @@ impl<'out> Interpreter<'out> {
                 let right = this.arithmetic(right)?;
                 combine(*op, left, right)
             }
-            code::ExprKind::Unary(op @ (UnaryOp::UnaryAdd | UnaryOp::UnarySub), operand) => {
-                match this.arithmetic(operand)? {
-                    Lazy::Value(value) if !matches!(value, Value::List(_)) => {
-                        Ok(Lazy::Value(unary(*op, value)?))
-                    }
-                    operand => Ok(Lazy::Unary(*op, Box::new(operand))),
+            code::ExprKind::Unary(
+                op @ (UnaryOp::UnaryAdd | UnaryOp::UnarySub | UnaryOp::Invert),
+                operand,
+            ) => match this.arithmetic(operand)? {
+                Lazy::Value(value) if !matches!(value, Value::List(_)) => {
+                    Ok(Lazy::Value(unary(*op, value)?))
                 }
-            }
+                operand => Ok(Lazy::Unary(*op, Box::new(operand))),
+            },
             _ => Ok(Lazy::Value(this.eval_expr(expr)?)),
         })
     }
@@ -2199,7 +2214,8 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(result)
             }
-            E::Binary(..) | E::Unary(UnaryOp::UnaryAdd | UnaryOp::UnarySub, _) => {
+            E::Binary(..)
+            | E::Unary(UnaryOp::UnaryAdd | UnaryOp::UnarySub | UnaryOp::Invert, _) => {
                 match self.arithmetic(expr)? {
                     Lazy::Value(value) => Ok(value),
                     lazy => elementwise(&lazy),

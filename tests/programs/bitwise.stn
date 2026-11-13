@@ -1,0 +1,62 @@
+// the bitwise operators on ints and bools, with Python's precedence
+MASK = 0xff
+print(0xff & 0b1010, 6 | 3, 6 ^ 3, ~5, ~-1, 0o17, 1_000_000)
+print(-17 >> 2, -1 >> 63, 7 >> 0, 1 << 62, -1 << 63, 3 << 2)
+print(1 | 2 ^ 3 & 4 << 1, (1 | 2) ^ 3, 5 & 3 == 1, 2 + 3 << 1, ~2 ** 2)
+print(true & false, true | false, true ^ true, false ^ true)
+
+fn shifted(value: int, count: int) -> int:
+    ret value << count
+
+fn halved(value: int, count: int) -> int:
+    ret value >> count
+
+for n in [0, 1, 9, 31, 32, 62]:
+    print(n, shifted(1, n), halved(-9223372036854775807 - 1, n), shifted(-1, n))
+
+// a hash in the style of FNV-1a, kept to 32 bits
+fn fnv(text: str) -> int:
+    h = 0x811c9dc5
+    for b in text.bytes():
+        h ^= b
+        h = (h * 0x01000193) & 0xffff_ffff
+    ret h
+
+print(halved(-1, 63), shifted(-1, 63), halved(1, 63))
+print(fnv(""), fnv("a"), fnv("stone"))
+
+// counting set bits two ways
+fn popcount(x: int) -> int:
+    n = 0
+    while x != 0:
+        x &= x - 1
+        n += 1
+    ret n
+
+fn bits(x: int) -> int:
+    n = 0
+    for i in range(64):
+        n += (x >> i) & 1
+    ret n
+
+for x in [0, 1, 255, 0x5555, -1, -9223372036854775807 - 1]:
+    print(x, popcount(x), bits(x))
+
+flags = 0
+flags |= 1 << 3
+flags |= MASK & 0b110
+flags ^= 0b10
+flags <<= 2
+flags >>= 1
+flags &= ~0b100
+print(flags, "{flags:#x}", "{flags:#b}")
+
+fn both(a: bool, b: bool) -> bool:
+    ret a & b
+
+seen = false
+for x in [3, 4, 5]:
+    seen |= x & 1 == 0
+    if both(x > 3, x & 1 == 1):
+        print("odd", x)
+print(seen)

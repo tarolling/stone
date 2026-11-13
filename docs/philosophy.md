@@ -132,7 +132,9 @@ values), an error a program expects is a `result[T, E]` that the caller must ope
 with `?`, never an exception that unwinds through code that did not ask for it, reading an
 unassigned variable is a checker error or a runtime error, and reference
 counting frees every string, list, and enum value exactly once. The checker rules out cyclic
-values, and enum values never change, so reference counting never leaks.
+values, and enum values never change, so reference counting never leaks. A shift is checked
+too, where C leaves it undefined: its count must be from 0 to 63, and `<<` stops the program
+rather than lose bits off the top of an int.
 
 ### Value semantics
 

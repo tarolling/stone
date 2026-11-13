@@ -65,6 +65,10 @@ pub enum Op {
     Sub,
     Mul,
     Div,
+    /// The bitwise operations, on `I64`s only.
+    And,
+    Or,
+    Xor,
 }
 
 /// A number the GPU gives each thread, as an `I64`.
@@ -246,6 +250,9 @@ impl Kernel {
                     Op::Sub => "sub",
                     Op::Mul => "mul",
                     Op::Div => "div",
+                    Op::And => "and",
+                    Op::Or => "or",
+                    Op::Xor => "xor",
                 };
                 write!(f, "{dst} = {}{name} {lhs}, {rhs}", prefix(*dst))
             }

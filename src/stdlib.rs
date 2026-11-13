@@ -1226,6 +1226,45 @@ pub const SLICE_STEP_ZERO: &str = "slice step cannot be zero";
 /// For example, `fill(INDEX_RANGE, &[1, 1])` is `list index out of range (index 1, length 1)`.
 pub const INDEX_RANGE: &str = "list index out of range (index {}, length {})";
 
+/// The runtime error for a shift by a count outside 0 to 63, as in `1 << 64` or `x >> -1`, with
+/// a `{}` for the count, which [`fill`] fills in.
+///
+/// For example, `fill(SHIFT_RANGE, &[64])` is `shift count out of range (count 64)`.
+pub const SHIFT_RANGE: &str = "shift count out of range (count {})";
+
+/// The runtime error for a left shift whose result does not fit in an int, as `1 << 63` does not.
+pub const SHIFT_OVERFLOW: &str = "integer overflow in shift";
+
+/// The largest count a shift takes.
+pub const MAX_SHIFT: i64 = 63;
+
+/// Shifts `value` left by `count`, as `<<` does: `Err(SHIFT_RANGE)` filled in for a count
+/// outside 0 to 63, and `Err(SHIFT_OVERFLOW)` when the exact result does not fit in an i64.
+///
+/// For example, `shift_left(3, 2)` is `Ok(12)`, `shift_left(-1, 63)` is `Ok(i64::MIN)`, and
+/// `shift_left(1, 63)` fails, since 2^63 is one more than the largest int.
+pub fn shift_left(value: i64, count: i64) -> Result<i64, String> {
+    if !(0..=MAX_SHIFT).contains(&count) {
+        return Err(fill(SHIFT_RANGE, &[count]));
+    }
+    let shifted = value << count;
+    match shifted >> count == value {
+        true => Ok(shifted),
+        false => Err(SHIFT_OVERFLOW.to_string()),
+    }
+}
+
+/// Shifts `value` right by `count`, as `>>` does, rounding down as Python does, or gives
+/// `Err(SHIFT_RANGE)` filled in for a count outside 0 to 63.
+///
+/// For example, `shift_right(-7, 1)` is `Ok(-4)`, and `shift_right(1, 64)` fails.
+pub fn shift_right(value: i64, count: i64) -> Result<i64, String> {
+    if !(0..=MAX_SHIFT).contains(&count) {
+        return Err(fill(SHIFT_RANGE, &[count]));
+    }
+    Ok(value >> count)
+}
+
 /// The runtime error for arithmetic on lists of different lengths, as in `[1, 2] + [3]`, with a
 /// `{}` for the first list's length and one for the first length that differs from it.
 ///
@@ -1811,6 +1850,12 @@ mod tests {
                 ("div".to_string(), vec!["div".to_string()]),
                 ("rem".to_string(), vec!["rem".to_string()]),
                 ("neg".to_string(), vec!["neg".to_string()]),
+                ("bitand".to_string(), vec!["bitand".to_string()]),
+                ("bitor".to_string(), vec!["bitor".to_string()]),
+                ("bitxor".to_string(), vec!["bitxor".to_string()]),
+                ("shl".to_string(), vec!["shl".to_string()]),
+                ("shr".to_string(), vec!["shr".to_string()]),
+                ("invert".to_string(), vec!["invert".to_string()]),
                 ("from".to_string(), vec!["from".to_string()]),
                 ("try_from".to_string(), vec!["try_from".to_string()]),
             ]

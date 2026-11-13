@@ -1,0 +1,5 @@
+x = 5
+n = -1
+print(x >> 1)
+x >>= n
+print(x)

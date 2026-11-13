@@ -12,6 +12,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- Highlighting of the bitwise operators (`&`, `^`, `~`, `<<`, `>>`, and their assignments) and
+  of hexadecimal, octal, and binary numbers and numbers with `_` between digits.
 - Errors point at the other places that explain them, such as the parameter whose type an
   argument does not fit, as related information the editor links to, in any file of the program,
   and show their notes and help after the message.

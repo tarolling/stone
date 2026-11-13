@@ -67,6 +67,9 @@ fn thread(kernel: &Kernel, args: &[Arg], buffers: &mut [Vec<u64>], global: u64, 
                             Op::Sub => float(a) - float(b),
                             Op::Mul => float(a) * float(b),
                             Op::Div => float(a) / float(b),
+                            Op::And | Op::Or | Op::Xor => {
+                                panic!("a bitwise float operation in {}", kernel.name)
+                            }
                         }
                         .to_bits(),
                         _ => match op {
@@ -74,6 +77,9 @@ fn thread(kernel: &Kernel, args: &[Arg], buffers: &mut [Vec<u64>], global: u64, 
                             Op::Sub => a.wrapping_sub(b),
                             Op::Mul => a.wrapping_mul(b),
                             Op::Div => panic!("int division in {}", kernel.name),
+                            Op::And => a & b,
+                            Op::Or => a | b,
+                            Op::Xor => a ^ b,
                         },
                     }
                 }
@@ -178,7 +184,14 @@ mod tests {
         }
         let ops: &[BinOp] = match float {
             true => &[BinOp::Add, BinOp::Sub, BinOp::Mul, BinOp::Div],
-            false => &[BinOp::Add, BinOp::Sub, BinOp::Mul],
+            false => &[
+                BinOp::Add,
+                BinOp::Sub,
+                BinOp::Mul,
+                BinOp::And,
+                BinOp::Or,
+                BinOp::Xor,
+            ],
         };
         match below(rng, 5) {
             0 => ir::Kernel::Neg(Box::new(tree(rng, float, depth - 1))),
@@ -218,6 +231,9 @@ mod tests {
                     return match op {
                         BinOp::Add => a.wrapping_add(b),
                         BinOp::Sub => a.wrapping_sub(b),
+                        BinOp::And => a & b,
+                        BinOp::Or => a | b,
+                        BinOp::Xor => a ^ b,
                         _ => a.wrapping_mul(b),
                     };
                 }
@@ -276,7 +292,16 @@ mod tests {
                 }
                 run(&kernel, &args, &mut buffers, blocks, threads);
                 let shape = format!("{source:?} on {blocks}x{threads}, length {len}");
-                assert_eq!(buffers[0], expected, "{shape}");
+                // a nan's sign bit is whatever the hardware gives, and every nan prints alike
+                let quiet = |bits: &[u64]| -> Vec<u64> {
+                    bits.iter()
+                        .map(|&b| match float && f64::from_bits(b).is_nan() {
+                            true => f64::NAN.to_bits(),
+                            false => b,
+                        })
+                        .collect()
+                };
+                assert_eq!(quiet(&buffers[0]), quiet(&expected), "{shape}");
                 if kernel.params.len() > 2 + arguments(&source).len() {
                     assert_eq!(buffers.last().unwrap()[0], failed as u64, "{shape}");
                 } else {

@@ -160,7 +160,10 @@ fn computation(inst: &Inst) -> Option<(Computation, Operand, Operand, VReg)> {
     let none = Operand::Imm(0);
     Some(match *inst {
         Inst::Binary { op, dst, lhs, rhs } => {
-            let (lhs, rhs) = if matches!(op, BinOp::Add | BinOp::Mul) {
+            let (lhs, rhs) = if matches!(
+                op,
+                BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or | BinOp::Xor
+            ) {
                 let (lhs, rhs, _) = ordered(lhs, rhs);
                 (lhs, rhs)
             } else {
@@ -565,7 +568,15 @@ fn fold_offsets(function: &mut Function) {
 fn is_arithmetic(inst: &Inst) -> bool {
     match inst {
         Inst::Binary { op, rhs, .. } => match op {
-            BinOp::Add | BinOp::Sub | BinOp::Mul => true,
+            // a shift's count was checked before it, and any count gives some result
+            BinOp::Add
+            | BinOp::Sub
+            | BinOp::Mul
+            | BinOp::And
+            | BinOp::Or
+            | BinOp::Xor
+            | BinOp::Shl
+            | BinOp::Shr => true,
             BinOp::Div | BinOp::Rem => matches!(rhs, Operand::Imm(d) if *d != 0 && *d != -1),
             BinOp::Pow => matches!(rhs, Operand::Imm(e) if *e >= 0),
             BinOp::DivUnchecked => false,

@@ -146,7 +146,7 @@
     },
     "number": {
       "name": "constant.numeric.integer.stone",
-      "match": "\\b[0-9]+\\b"
+      "match": "\\b(0[xX][0-9A-Fa-f_]+|0[oO][0-7_]+|0[bB][01_]+|[0-9][0-9_]*(\\.[0-9][0-9_]*)?([eE][+-]?[0-9][0-9_]*)?)\\b"
     },
     "builtin": {
       "name": "support.function.builtin.stone",
@@ -162,11 +162,19 @@
       "patterns": [
         {
           "name": "keyword.operator.assignment.augmented.stone",
-          "match": "\\*\\*=|\\+=|-=|\\*=|/=|%="
+          "match": "\\*\\*=|<<=|>>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^="
+        },
+        {
+          "name": "keyword.operator.bitwise.shift.stone",
+          "match": "<<|>>"
         },
         {
           "name": "keyword.operator.comparison.stone",
           "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.bitwise.stone",
+          "match": "&|\\^|~"
         },
         {
           "name": "keyword.operator.assignment.stone",

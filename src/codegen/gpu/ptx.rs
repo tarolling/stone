@@ -265,6 +265,10 @@ fn instruction(
                 (_, Op::Sub) => "sub.s64",
                 (_, Op::Mul) => "mul.lo.s64",
                 (ty, Op::Div) => return Err(format!("PTX has no division of {ty} for stone yet")),
+                (Ty::F64, op) => return Err(format!("PTX has no {op:?} of floats")),
+                (_, Op::And) => "and.b64",
+                (_, Op::Or) => "or.b64",
+                (_, Op::Xor) => "xor.b64",
             };
             let operands = [dst, lhs, rhs].map(|value| reg(registers, value));
             line(out, opcode, &operands.each_ref().map(String::as_str));
@@ -441,6 +445,24 @@ $stone_k0_b5:
             assert!(text.contains(wanted), "{wanted:?} in {text}");
         }
         assert!(!text.contains("f64"), "{text}");
+    }
+
+    #[test]
+    fn bitwise_operations_work_on_whole_words() {
+        // (a & b | 15) ^ -1, which is how `~` reaches a kernel
+        let source = ir::Kernel::Binary(
+            BinOp::Xor,
+            Box::new(ir::Kernel::Binary(
+                BinOp::Or,
+                Box::new(ir::Kernel::Binary(BinOp::And, list(1), list(2))),
+                Box::new(ir::Kernel::Number(Operand::Imm(15))),
+            )),
+            Box::new(ir::Kernel::Number(Operand::Imm(-1))),
+        );
+        let text = module(&[kernel(source, false)], sm_75()).unwrap();
+        for wanted in ["\tand.b64 \t%rd", "\tor.b64 \t%rd", "\txor.b64 \t%rd"] {
+            assert!(text.contains(wanted), "{wanted:?} in {text}");
+        }
     }
 
     #[test]

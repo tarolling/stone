@@ -344,18 +344,31 @@ impl Lexer {
         }
     }
 
-    /// Lexes an integer literal such as `42`, or a float literal such as `1.5`, `1e3`, or `2.5e-3`.
+    /// Lexes an integer literal such as `42`, `1_000`, `0xff`, `0o17`, or `0b1010`, or a float
+    /// literal such as `1.5`, `1e3`, or `2.5e-3`.
     ///
     /// A float needs a digit after its `.` and after its `e` and optional sign, so `1.` lexes as
-    /// `1` then `.`, and `1e` as `1` then the name `e`.
+    /// `1` then `.`, and `1e` as `1` then the name `e`. A `_` may stand between two digits, and
+    /// right after a base prefix, as in Python, so `0x_ff` and `1_000.5` are numbers but `1__0`
+    /// and `1_` are errors.
     fn lex_number(&mut self) -> Result<TokenType, LexError> {
         let start = self.pos();
-        let mut num = self.lex_digits();
+        if self.peek() == Some('0')
+            && let Some((radix, base)) = match self.peek_at(1) {
+                Some('x' | 'X') => Some((16, "hexadecimal")),
+                Some('o' | 'O') => Some((8, "octal")),
+                Some('b' | 'B') => Some((2, "binary")),
+                _ => None,
+            }
+        {
+            return self.lex_prefixed(start, radix, base);
+        }
+        let mut num = self.lex_digits(start)?;
         let mut is_float = false;
         if self.peek() == Some('.') && self.peek_at(1).is_some_and(|ch| ch.is_ascii_digit()) {
             self.advance();
             num.push('.');
-            num += &self.lex_digits();
+            num += &self.lex_digits(start)?;
             is_float = true;
         }
         if matches!(self.peek(), Some('e' | 'E')) {
@@ -365,7 +378,7 @@ impl Lexer {
                 for _ in 0..1 + sign as usize {
                     num.push(self.advance().unwrap());
                 }
-                num += &self.lex_digits();
+                num += &self.lex_digits(start)?;
                 is_float = true;
             }
         }
@@ -388,14 +401,82 @@ impl Lexer {
         }
     }
 
-    /// Lexes a run of ASCII digits, which may be empty.
-    fn lex_digits(&mut self) -> String {
+    /// Lexes a run of ASCII digits, which may be empty, with the `_`s between them left out, for
+    /// the number starting at `start`.
+    ///
+    /// For example, `1_000` gives `"1000"`, and `1__0` is an error.
+    fn lex_digits(&mut self, start: Pos) -> Result<String, LexError> {
         let mut digits = String::new();
-        while let Some(ch) = self.peek().filter(char::is_ascii_digit) {
-            digits.push(ch);
+        while let Some(ch) = self.peek().filter(|ch| ch.is_ascii_digit() || *ch == '_') {
             self.advance();
+            if ch == '_' {
+                if !self.peek().is_some_and(|ch| ch.is_ascii_digit()) {
+                    return Err(self.misplaced_underscore(start));
+                }
+            } else {
+                digits.push(ch);
+            }
         }
-        digits
+        Ok(digits)
+    }
+
+    /// Lexes an integer literal with a base prefix, such as `0xff`, whose base is `radix` and
+    /// named `base` in errors, starting at `start` on its `0`.
+    ///
+    /// For example, `0b1_010` is `10`, and `0b102` is the error `invalid digit '2' in binary
+    /// literal`.
+    fn lex_prefixed(&mut self, start: Pos, radix: u32, base: &str) -> Result<TokenType, LexError> {
+        let mut text: String = (0..2).map(|_| self.advance().unwrap()).collect();
+        let mut digits = String::new();
+        while let Some(ch) = self
+            .peek()
+            .filter(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        {
+            self.advance();
+            text.push(ch);
+            if ch == '_' {
+                // after the prefix or between digits, never doubled or last
+                let next = self.peek();
+                if !next.is_some_and(|ch| ch.is_ascii_alphanumeric()) {
+                    if digits.is_empty() && next.is_none_or(|ch| ch != '_') {
+                        break;
+                    }
+                    return Err(self.misplaced_underscore(start));
+                }
+            } else if ch.is_digit(radix) {
+                digits.push(ch);
+            } else {
+                return Err(LexError {
+                    code: Code::Literal,
+                    message: format!("invalid digit '{ch}' in {base} literal"),
+                    span: Span::new(start, self.pos()),
+                });
+            }
+        }
+        let span = Span::new(start, self.pos());
+        if digits.is_empty() {
+            return Err(LexError {
+                code: Code::Literal,
+                message: format!("{base} literal {text} has no digits"),
+                span,
+            });
+        }
+        i64::from_str_radix(&digits, radix)
+            .map(TokenType::Number)
+            .map_err(|_| LexError {
+                code: Code::Literal,
+                message: format!("integer literal {text} is too large"),
+                span,
+            })
+    }
+
+    /// Returns the error of a `_` in the number starting at `start` that is not between digits.
+    fn misplaced_underscore(&self, start: Pos) -> LexError {
+        LexError {
+            code: Code::Literal,
+            message: "'_' in a number must be between digits".to_string(),
+            span: Span::new(start, self.pos()),
+        }
     }
 
     /// Lexes the text of a string after its opening quote, if `first`, or after the `}` that
@@ -730,7 +811,33 @@ impl Lexer {
             }
             Some('|') => {
                 self.advance();
-                TokenType::VBar
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenType::Operator("|=")
+                } else {
+                    TokenType::VBar
+                }
+            }
+            Some('&') => {
+                self.advance();
+                self.augmented("&", "&=")
+            }
+            Some('^') => {
+                self.advance();
+                self.augmented("^", "^=")
+            }
+            Some('~') => {
+                self.advance();
+                TokenType::Operator("~")
+            }
+            Some(first @ ('<' | '>')) if self.peek_at(1) == Some(first) => {
+                self.advance();
+                self.advance();
+                if first == '<' {
+                    self.augmented("<<", "<<=")
+                } else {
+                    self.augmented(">>", ">>=")
+                }
             }
             Some(':') if self.holes.last().is_some_and(|hole| hole.depth == 0) => {
                 self.advance();
@@ -1316,6 +1423,67 @@ testing(1, 2, 3)"#;
         );
         assert_eq!(types_of("a**=2\n")[1], op("**="));
         assert_eq!(types_of("a ** = 2\n")[1..3], [op("**"), op("=")]);
+    }
+
+    #[test]
+    fn bitwise_and_shift_operators_are_one_token() {
+        assert_eq!(
+            types_of("a & b ^ c << d >> e < f > g ~h\n")
+                .into_iter()
+                .filter(|t| matches!(t, TokenType::Operator(_)))
+                .collect::<Vec<_>>(),
+            ["&", "^", "<<", ">>", "<", ">", "~"].map(op)
+        );
+        assert_eq!(
+            types_of("a &= b |= c ^= d <<= e >>= f\n")
+                .into_iter()
+                .filter(|t| matches!(t, TokenType::Operator(_)))
+                .collect::<Vec<_>>(),
+            ["&=", "|=", "^=", "<<=", ">>="].map(op)
+        );
+        // `|` alone stays a bar, for lambdas, or-patterns, and binary or
+        assert_eq!(types_of("a | b\n")[1], TokenType::VBar);
+        assert_eq!(types_of("a<<b\n")[1], op("<<"));
+        assert_eq!(types_of("a < < b\n")[1..3], [op("<"), op("<")]);
+    }
+
+    #[test]
+    fn integer_literals_take_a_base_prefix_and_underscores() {
+        let number = |source: &str| types_of(&format!("{source}\n"))[0].clone();
+        assert_eq!(number("0xff"), TokenType::Number(255));
+        assert_eq!(number("0XFF"), TokenType::Number(255));
+        assert_eq!(number("0x_dead_BEEF"), TokenType::Number(0xdead_beef));
+        assert_eq!(number("0o17"), TokenType::Number(15));
+        assert_eq!(number("0b1010"), TokenType::Number(10));
+        assert_eq!(number("0B1_0"), TokenType::Number(2));
+        assert_eq!(number("1_000_000"), TokenType::Number(1_000_000));
+        assert_eq!(number("0x7fff_ffff_ffff_ffff"), TokenType::Number(i64::MAX));
+        assert_eq!(number("1_000.5"), TokenType::Float(1000.5));
+        assert_eq!(number("1e1_0"), TokenType::Float(1e10));
+        assert_eq!(number("1_0.2_5e1"), TokenType::Float(102.5));
+    }
+
+    #[test]
+    fn bad_integer_literals_are_errors() {
+        let error = |source: &str| {
+            Lexer::new(&format!("{source}\n"))
+                .lex()
+                .expect_err(source)
+                .message
+        };
+        assert_eq!(error("0b102"), "invalid digit '2' in binary literal");
+        assert_eq!(error("0o8"), "invalid digit '8' in octal literal");
+        assert_eq!(error("0xfg"), "invalid digit 'g' in hexadecimal literal");
+        assert_eq!(error("0x"), "hexadecimal literal 0x has no digits");
+        assert_eq!(error("0x_"), "hexadecimal literal 0x_ has no digits");
+        assert_eq!(
+            error("0x8000_0000_0000_0000"),
+            "integer literal 0x8000_0000_0000_0000 is too large"
+        );
+        assert_eq!(error("1__0"), "'_' in a number must be between digits");
+        assert_eq!(error("1_"), "'_' in a number must be between digits");
+        assert_eq!(error("0x_1_"), "'_' in a number must be between digits");
+        assert_eq!(error("1_.5"), "'_' in a number must be between digits");
     }
 
     #[test]

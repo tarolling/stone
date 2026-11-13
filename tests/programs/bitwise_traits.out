@@ -1,0 +1,5 @@
+Flags(bits=5) Flags(bits=4) Flags(bits=4) Flags(bits=14)
+Flags(bits=10)
+Flags(bits=13) 7 true
+Flags(bits=14) -6 48 Flags(bits=16)
+[Flags(bits=5), Flags(bits=4)]

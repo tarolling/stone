@@ -66,7 +66,7 @@ since stone copies values.
 | `defaultdict(int)` | check `k in d` before reading or changing |
 | `set()`, `s.add(x)`, `x in s` | `{}` or `{1, 2}`, `s.add(x)`, `x in s`: a `set[T]` of ints, strings, or bools, kept in insertion order |
 | `s.discard(x)`, `s.remove(x)` | `s.remove(x)`, which returns whether `s` had `x` and never fails |
-| `a \| b`, `a & b`, `a - b`, `a <= b`, `a >= b`, `a.isdisjoint(b)` | `a.union(b)`, `a.intersection(b)`, `a.difference(b)`, `a.is_subset(b)`, `a.is_superset(b)`, `a.is_disjoint(b)` (no set operators) |
+| `a \| b`, `a & b`, `a - b`, `a <= b`, `a >= b`, `a.isdisjoint(b)` on sets | `a.union(b)`, `a.intersection(b)`, `a.difference(b)`, `a.is_subset(b)`, `a.is_superset(b)`, `a.is_disjoint(b)` (no set operators; `\|` and `&` are for ints and bools) |
 | `set(xs)`, `list(s)`, `sorted(s)` | `set(xs)`, `list(s)`; then `.sort()` the list |
 | `collections.Counter` | a map of counts, or a list of structs as in the worked example |
 

@@ -255,6 +255,12 @@ operand as `self` and the right one as `other`:
 | `a / b`, `a /= b` | `div[R]` | `fn div(self, other: R) -> Self` |
 | `a % b`, `a %= b` | `rem[R]` | `fn rem(self, other: R) -> Self` |
 | `-a` | `neg` | `fn neg(self) -> Self` |
+| `a & b`, `a &= b` | `bitand[R]` | `fn bitand(self, other: R) -> Self` |
+| `a \| b`, `a \|= b` | `bitor[R]` | `fn bitor(self, other: R) -> Self` |
+| `a ^ b`, `a ^= b` | `bitxor[R]` | `fn bitxor(self, other: R) -> Self` |
+| `a << b`, `a <<= b` | `shl[R]` | `fn shl(self, other: R) -> Self` |
+| `a >> b`, `a >>= b` | `shr[R]` | `fn shr(self, other: R) -> Self` |
+| `~a` | `invert` | `fn invert(self) -> Self` |
 
 ```stone
 struct Vector:
@@ -283,9 +289,9 @@ error, since `float` has no `mul` that takes a `Vector`. A type implementing a t
 right operands, as `mul[float]` and `mul[Vector]`, has the one the right operand's type fits.
 `**` and unary `+` stay numbers' alone.
 
-`int` and `float` implement every operator trait with their own type, and `str` and `bytes`
-implement `add` with theirs, so a bound works for numbers and strings too, which their own
-operators compute:
+`int` implements every operator trait with its own type, `float` the arithmetic ones, `bool`
+`bitand`, `bitor`, and `bitxor`, and `str` and `bytes` implement `add` with theirs, so a bound
+works for numbers, bools, and strings too, which their own operators compute:
 
 ```stone
 fn total[T: add[T]](xs: list[T], zero: T) -> T:

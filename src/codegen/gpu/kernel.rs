@@ -367,6 +367,9 @@ impl Element<'_> {
                     (BinOp::Sub, _) => Op::Sub,
                     (BinOp::Mul, _) => Op::Mul,
                     (BinOp::Div, Ty::F64) => Op::Div,
+                    (BinOp::And, Ty::I64) => Op::And,
+                    (BinOp::Or, Ty::I64) => Op::Or,
+                    (BinOp::Xor, Ty::I64) => Op::Xor,
                     _ => return Err(format!("a GPU kernel cannot compute {op:?} on {ty} yet")),
                 };
                 if op == Op::Div

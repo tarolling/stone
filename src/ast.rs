@@ -165,19 +165,22 @@ impl CompOp {
 /// A unary operator, such as `-` in `-x`.
 ///
 /// ```text
-/// unaryop = Not | UnaryAdd | UnarySub
+/// unaryop = Not | UnaryAdd | UnarySub | Invert
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {
     Not,
     UnaryAdd,
     UnarySub,
+    /// `~`, an int with every bit flipped: `~5` is `-6`.
+    Invert,
 }
 
 /// A binary arithmetic operator, such as `+` in `a + b`.
 ///
 /// ```text
-/// operator = Add | Subtract | Multiply | Divide | Modulo | Power
+/// operator = Add | Subtract | Multiply | Divide | Modulo | Power | BitAnd | BitOr | BitXor
+///          | LShift | RShift
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Operator {
@@ -189,6 +192,17 @@ pub enum Operator {
     Modulo,
     /// `**`, which raises an int or float base to an int exponent: `2 ** 10` is `1024`.
     Power,
+    /// `&`, the bits set in both ints, or whether both bools are true: `6 & 3` is `2`.
+    BitAnd,
+    /// `|`, the bits set in either int, or whether either bool is true: `6 | 3` is `7`.
+    BitOr,
+    /// `^`, the bits set in exactly one int, or whether the bools differ: `6 ^ 3` is `5`.
+    BitXor,
+    /// `<<`, an int shifted left by a count from 0 to 63, failing if the result does not fit:
+    /// `3 << 2` is `12`.
+    LShift,
+    /// `>>`, an int shifted right by a count from 0 to 63, rounding down: `-7 >> 1` is `-4`.
+    RShift,
 }
 
 /// A boolean operator, such as `and` in `a and b`.

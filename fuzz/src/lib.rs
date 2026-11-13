@@ -248,7 +248,7 @@ impl Generator {
                 if !scope.variables.is_empty() && u.arbitrary()? {
                     // an existing variable is assigned or updated, as in `g0 += 1`
                     let target = u.choose(&scope.variables)?.clone();
-                    let op = *u.choose(&["", "+", "-", "*", "/", "%"])?;
+                    let op = *u.choose(&["", "+", "-", "*", "/", "%", "&", "|", "^"])?;
                     self.line(indent, &format!("{target} {op}= {value}"));
                 } else {
                     let prefix = if scope.in_function { "l" } else { "g" };
@@ -373,8 +373,8 @@ impl Generator {
                 // arithmetic on a list and itself, so the lengths always match
                 let name = self.fresh("list");
                 let value = self.expression(u, scope, 0)?;
-                let op = *u.choose(&["+", "-", "*"])?;
-                let sign = *u.choose(&["", "-"])?;
+                let op = *u.choose(&["+", "-", "*", "&", "|", "^"])?;
+                let sign = *u.choose(&["", "-", "~"])?;
                 self.line(
                     indent,
                     &format!("{name} = ({list}) {op} {sign}({value}) * {list}"),
@@ -751,7 +751,7 @@ impl Generator {
     /// expression: sum
     /// sum:        term (('+' | '-') term)*
     /// term:       factor (('*' | '/' | '%') factor)*
-    /// factor:     '-' factor | primary ['**' exponent]
+    /// factor:     '-' factor | '~' factor | '(' factor bitwise ')' | primary ['**' exponent]
     /// ```
     fn expression(
         &mut self,
@@ -783,9 +783,28 @@ impl Generator {
     }
 
     fn factor(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
-        if nesting < MAX_NESTING && u.int_in_range(0..=7)? == 7 {
+        // one draw, as a plain factor always took, so the rest of a program draws as before. A
+        // shift is kept from failing nearly always: `>>` takes a count masked to 0 to 63, and
+        // `<<` shifts a value masked to 16 bits by at most 40, but now and then a shift takes
+        // any count, which both backends must reject alike.
+        let choice = u.int_in_range(0..=31)?;
+        if nesting < MAX_NESTING && choice >= 22 {
             let operand = self.factor(u, scope, nesting + 1)?;
-            return Ok(format!("-{operand}"));
+            return Ok(match choice {
+                28.. => format!("-{operand}"),
+                27 => format!("~{operand}"),
+                26 => format!("({operand} & {})", self.factor(u, scope, nesting + 1)?),
+                25 => format!("({operand} | {})", self.factor(u, scope, nesting + 1)?),
+                24 => format!("({operand} ^ {})", self.factor(u, scope, nesting + 1)?),
+                23 => format!(
+                    "({operand} >> ({} & 63))",
+                    self.factor(u, scope, nesting + 1)?
+                ),
+                _ if u.ratio(1, 8)? => {
+                    format!("({operand} << {})", self.factor(u, scope, nesting + 1)?)
+                }
+                _ => format!("(({operand} & 0xffff) << {})", u.int_in_range(0..=40)?),
+            });
         }
         let base = self.primary(u, scope, nesting)?;
         if nesting < MAX_NESTING && u.int_in_range(0..=7)? == 7 {
@@ -821,7 +840,15 @@ impl Generator {
             2 if nesting < MAX_NESTING && !self.functions.is_empty() => {
                 self.call(u, scope, nesting + 1)
             }
-            3 => Ok(u.int_in_range(0..=i64::MAX)?.to_string()),
+            3 => {
+                // the number's own low bits pick how it is written, drawing nothing more
+                let n = u.int_in_range(0..=i64::MAX)?;
+                Ok(match n % 4 {
+                    0 => format!("{n:#x}"),
+                    1 => format!("{n:#b}"),
+                    _ => n.to_string(),
+                })
+            }
             5 if nesting < MAX_NESTING && !scope.floats.is_empty() && u.arbitrary()? => {
                 // fails for nan and huge floats, which the differential check skips
                 let inner = self.float_expression(u, scope, nesting + 1)?;
@@ -1276,7 +1303,7 @@ mod tests {
     /// Returns whether `source` has an augmented assignment, such as `g0 += 1`, whose target ends
     /// with `end`: `"]"` for an element, as in `list1[0] *= 2`, or `""` for any target.
     fn uses_augmented(source: &str, end: &str) -> bool {
-        ["+=", "-=", "*=", "/=", "%="]
+        ["+=", "-=", "*=", "/=", "%=", "&=", "|=", "^="]
             .iter()
             .any(|op| source.contains(&format!("{end} {op} ")))
     }
@@ -1302,6 +1329,9 @@ mod tests {
             " % ",
             " ** ",
             "math.",
+            " & ",
+            " ^ ",
+            " >> (",
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 25, "only {count} of 500 programs use {feature:?}");

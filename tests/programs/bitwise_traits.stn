@@ -1,0 +1,44 @@
+// structs and type parameters take the bitwise operators through their traits
+struct Flags:
+    bits: int
+
+impl bitor[Flags] for Flags:
+    fn bitor(self, other: Flags) -> Self:
+        ret Flags(bits=self.bits | other.bits)
+
+impl bitand[int] for Flags:
+    fn bitand(self, other: int) -> Self:
+        ret Flags(bits=self.bits & other)
+
+impl shl[int] for Flags:
+    fn shl(self, other: int) -> Self:
+        ret Flags(bits=self.bits << other)
+
+impl invert for Flags:
+    fn invert(self) -> Self:
+        ret Flags(bits=~self.bits & 0xf)
+
+fn union[T: bitor[T]](items: list[T], empty: T) -> T:
+    acc = empty
+    for item in items:
+        acc = acc | item
+    ret acc
+
+fn flipped[T: invert](x: T) -> T:
+    ret ~x
+
+fn moved[T: shl[int]](x: T) -> T:
+    ret x << 3 << 1
+
+a = Flags(bits=0b0001)
+b = Flags(bits=0b0100)
+print(a | b, (a | b) & 0b0100, a << 2, ~a)
+c = a
+c |= b
+c <<= 1
+print(c)
+print(union([a, b, Flags(bits=8)], Flags(bits=0)), union([1, 2, 4], 0), union([false, true], false))
+print(flipped(a), flipped(5), moved(3), moved(a))
+fs = [a, b]
+fs[0] |= b
+print(fs)

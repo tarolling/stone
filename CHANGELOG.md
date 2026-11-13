@@ -12,6 +12,17 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Bitwise operators: `&`, `|`, `^`, `~`, `<<`, and `>>` on ints, with Python's precedence (looser
+  than arithmetic and tighter than comparisons, so `a & b == c` is `(a & b) == c`), and their
+  assignments `&=`, `|=`, `^=`, `<<=`, and `>>=`. `&`, `|`, and `^` also take two bools, giving a
+  bool and always evaluating both. On lists of ints they work element by element, broadcasting
+  a number as `+` does, with SIMD for `&`, `|`, `^`, and `~`. A shift's count must be from 0 to
+  63 (`shift count out of range (count 64)`), `>>` rounds down as in Python, and `<<` stops the
+  program with `integer overflow in shift` when the result does not fit, so `1 << 63` fails
+  while `-1 << 63` is the smallest int. The prelude's traits `bitand`, `bitor`, `bitxor`, `shl`,
+  `shr`, and `invert` let structs and bounded type parameters take them, as `add` does for `+`.
+- Int literals in hexadecimal, octal, and binary (`0xff`, `0o17`, `0b1010`), and `_` between the
+  digits of any number (`1_000_000`, `0x_dead_beef`, `1_000.5`).
 - Trait values: a trait's name is a type whose values are values of any type that implements
   it, as `dyn Shape` is in Rust, so `list[Shape]` holds circles and squares together. A value
   becomes one wherever one is expected (an argument, a `ret`, a field, an element, `append`, a

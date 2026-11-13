@@ -7082,3 +7082,104 @@ fn an_as_pattern_binds_the_narrowed_value() {
     assert_eq!(type_of_symbol(&source, "c"), "Circle");
     assert_eq!(type_of_symbol(&source, "some_shape"), "Shape");
 }
+
+#[test]
+fn bitwise_operators_take_ints_and_bools() {
+    let source = "a = 6 & 3\nb = 6 | 3\nc = 6 ^ 3\nd = ~6\ne = 1 << 4\nf = -9 >> 1\n\
+                  g = true & false\nh = true | false\ni = true ^ true\nj = (a & b) == c\n\
+                  k = [1, 2] & 3\nl = 1 << [1, 2]\nm = ~[1, 2]\nn = [5, 6] ^ [1, 2]\n";
+    assert_eq!(errors(source), []);
+    for name in ["a", "b", "c", "d", "e", "f"] {
+        assert_eq!(type_of_symbol(source, name), "int", "{name}");
+    }
+    for name in ["g", "h", "i", "j"] {
+        assert_eq!(type_of_symbol(source, name), "bool", "{name}");
+    }
+    for name in ["k", "l", "m", "n"] {
+        assert_eq!(type_of_symbol(source, name), "list[int]", "{name}");
+    }
+    // augmented forms, and an unknown operand settled later
+    let source = "fn f(x: int) -> int:\n    y = x\n    y &= 0xff\n    y <<= 2\n    ret y\n\
+                  fn g() -> int:\n    xs = []\n    r = xs[0] | 1\n    xs.append(2)\n    ret r\n\
+                  fn h(a: bool, b: bool) -> bool:\n    c = a\n    c ^= b\n    ret c & a\n";
+    assert_eq!(errors(source), []);
+}
+
+#[test]
+fn bitwise_operators_reject_other_operands() {
+    assert_error(
+        "x = 1.5 & 1.0\n",
+        "'&' needs int or bool operands, found float",
+        1,
+        5,
+    );
+    assert_error(
+        "x = true << true\n",
+        "'<<' needs int operands, found bool",
+        1,
+        5,
+    );
+    assert_error("x = ~true\n", "'~' needs an int operand, found bool", 1, 6);
+    assert_error("x = ~1.5\n", "'~' needs an int operand, found float", 1, 6);
+    assert_error(
+        "x = \"a\" | \"b\"\n",
+        "'|' needs int or bool operands, found str",
+        1,
+        5,
+    );
+    assert_error("x = 1 ^ true\n", "expected int, found bool", 1, 9);
+    assert_error(
+        "x = [1.5] & 1.0\n",
+        "'&' on lists needs int elements, found float",
+        1,
+        5,
+    );
+    assert_error(
+        "x = [true] | [false]\n",
+        "'|' on lists needs int elements, found bool",
+        1,
+        5,
+    );
+    assert_error(
+        "x = [1.5] >> 1.0\n",
+        "'>>' on lists needs int elements, found float",
+        1,
+        5,
+    );
+    assert_error(
+        "fn f[T](x: T) -> T:\n    ret x & x\n",
+        "'&' needs 'T' to implement 'bitand', since 'T' may be any type; bound it, as in \
+         '[T: bitand[T]]'",
+        2,
+        9,
+    );
+}
+
+const BIT_OPERATORS: &str = "struct Flags:\n    bits: int\n\
+impl bitor[Flags] for Flags:\n    fn bitor(self, other: Flags) -> Self:\n        \
+ret Flags(bits=self.bits | other.bits)\n\
+impl shl[int] for Flags:\n    fn shl(self, other: int) -> Self:\n        \
+ret Flags(bits=self.bits << other)\n\
+impl invert for Flags:\n    fn invert(self) -> Self:\n        ret Flags(bits=~self.bits)\n";
+
+#[test]
+fn bitwise_operators_call_the_impls_of_their_traits() {
+    let source = format!(
+        "{BIT_OPERATORS}f = Flags(bits=1)\na = f | f\nb = f << 2\nc = ~f\nf |= a\n\
+         fn any[T: bitor[T]](x: T, y: T) -> T:\n    ret x | y\nd = any(f, f)\ne = any(1, 2)\n\
+         g = any(true, false)\n"
+    );
+    assert_eq!(errors(&source), []);
+    for name in ["a", "b", "c", "d"] {
+        assert_eq!(type_of_symbol(&source, name), "Flags");
+    }
+    assert_eq!(type_of_symbol(&source, "e"), "int");
+    assert_eq!(type_of_symbol(&source, "g"), "bool");
+    assert!(method_calls(&source).contains(&("Flags.shl..int".to_string(), true, false)));
+    assert_error(
+        &format!("{BIT_OPERATORS}fn any[T: shl[int]](x: T) -> T:\n    ret x << 1\ny = any(1.5)\n"),
+        "'float' does not implement 'shl[int]', which 'any' needs for 'T'",
+        14,
+        5,
+    );
+}

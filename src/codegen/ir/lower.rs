@@ -43,10 +43,11 @@ use crate::ast::{
     PatternField, PatternKind, Stmt, StmtKind, UnaryOp, constant_int, is_lambda, is_test,
 };
 use crate::checker::{
-    Analysis, Coercion, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods,
-    OPERATOR_TRAITS, OPTION, ORD, ORDERING, RESULT, Step, Structs, SymbolKind, TraitValueMethod,
-    Type, collect_assigned, collect_changed, may_name_enum, may_name_struct, place, place_root,
-    place_spans, range_args, struct_display, trait_operator, type_text, variant_display, variants,
+    Analysis, Coercion, Conversion, Converter, DISPLAY, EQ, Enums, INVERT, Instance, Method,
+    Methods, OPERATOR_TRAITS, OPTION, ORD, ORDERING, RESULT, Step, Structs, SymbolKind,
+    TraitValueMethod, Type, collect_assigned, collect_changed, may_name_enum, may_name_struct,
+    place, place_root, place_spans, range_args, struct_display, trait_operator, type_text,
+    variant_display, variants,
 };
 use crate::codegen::Os;
 use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
@@ -57,9 +58,9 @@ use crate::span::{FileId, Span};
 use crate::stdlib::spec::{Align, FormatSpec, Presentation, Sign};
 use crate::stdlib::{
     ASSERTION_FAILED, BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, CUT_CHARACTER,
-    END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE,
-    PRELUDE_CLAMP, PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR,
-    UNWRAP_NONE, UNWRAP_OK, math, module_constant, random,
+    END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, MAX_SHIFT, POP_EMPTY, POP_RANGE,
+    PRELUDE_CLAMP, PRELUDE_SORT, PRINT_DEPTH, SHIFT_OVERFLOW, SHIFT_RANGE, SLICE_STEP_ZERO,
+    STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE, UNWRAP_OK, math, module_constant, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -5097,6 +5098,13 @@ impl<'a> Lowerer<'a> {
                 let dst = self.dst(into);
                 self.push(match op {
                     UnaryOp::Not => Inst::Not { dst, src },
+                    // every bit flipped
+                    UnaryOp::Invert => Inst::Binary {
+                        op: BinOp::Xor,
+                        dst,
+                        lhs: src,
+                        rhs: Operand::Imm(-1),
+                    },
                     _ if float => Inst::FloatNeg { dst, src },
                     _ => Inst::Neg { dst, src },
                 });
@@ -5528,6 +5536,10 @@ impl<'a> Lowerer<'a> {
     ) -> Operand {
         let dst = self.dst(into);
         let op = bin_op(op);
+        if matches!(op, BinOp::Shl | BinOp::Shr) {
+            self.shift(op, dst, lhs, rhs);
+            return Operand::Reg(dst);
+        }
         self.push(match ty {
             // only `+` applies to strings and bytes
             Type::Str | Type::Bytes => Inst::Call {
@@ -5542,6 +5554,46 @@ impl<'a> Lowerer<'a> {
         self.release_temp(rhs);
         self.own(Operand::Reg(dst), RcKind::of(ty));
         Operand::Reg(dst)
+    }
+
+    /// Shifts the int `lhs` by `rhs` into `dst`, as `<<` or `>>` (`op` is `BinOp::Shl` or
+    /// `BinOp::Shr`), failing with [`SHIFT_RANGE`] unless the count is from 0 to 63 and, for
+    /// `<<`, with [`SHIFT_OVERFLOW`] unless shifting the result back gives `lhs`, so the exact
+    /// result fits.
+    ///
+    /// For example, `x << n` lowers to checks of `n` against 0 and 63, then
+    /// `v3 = shl v0, v1`, `v4 = shr v3, v1`, a check that `v4` is `v0`, and `v2 = copy v3`; a
+    /// constant count in range needs no check of its own.
+    fn shift(&mut self, op: BinOp, dst: VReg, lhs: Operand, rhs: Operand) {
+        if !matches!(rhs, Operand::Imm(n) if (0..=MAX_SHIFT).contains(&n)) {
+            let count = vec![rhs];
+            self.fail_unless_with(Cond::Ge, rhs, Operand::Imm(0), SHIFT_RANGE, count.clone());
+            self.fail_unless_with(Cond::Le, rhs, Operand::Imm(MAX_SHIFT), SHIFT_RANGE, count);
+        }
+        if op == BinOp::Shr {
+            self.push(Inst::Binary { op, dst, lhs, rhs });
+            return;
+        }
+        // into a vreg of its own, since `dst` may be either operand
+        let shifted = self.fresh();
+        self.push(Inst::Binary {
+            op,
+            dst: shifted,
+            lhs,
+            rhs,
+        });
+        let back = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Shr,
+            dst: back,
+            lhs: Operand::Reg(shifted),
+            rhs,
+        });
+        self.fail_unless(Cond::Eq, Operand::Reg(back), lhs, SHIFT_OVERFLOW);
+        self.push(Inst::Copy {
+            dst,
+            src: Operand::Reg(shifted),
+        });
     }
 
     /// Returns whether `expr` adds strings or bytes, which [`Lowerer::string_sum`] lowers.
@@ -5655,6 +5707,19 @@ impl<'a> Lowerer<'a> {
                         operand: Box::new(operand),
                     });
                 }
+                // `~x` is `x ^ -1`, element by element
+                ExprKind::UnaryOp {
+                    op: UnaryOp::Invert,
+                    operand,
+                } => {
+                    let operand = self.fused(operand)?;
+                    return Ok(Fused::Binary {
+                        op: BinOp::Xor,
+                        float,
+                        lhs: Box::new(operand),
+                        rhs: Box::new(Fused::Number(Operand::Imm(-1))),
+                    });
+                }
                 _ => {}
             }
         }
@@ -5706,6 +5771,10 @@ impl<'a> Lowerer<'a> {
                 let lhs = self.element(lhs, index, loaded);
                 let rhs = self.element(rhs, index, loaded);
                 let dst = self.fresh();
+                if matches!(op, BinOp::Shl | BinOp::Shr) {
+                    self.shift(*op, dst, lhs, rhs);
+                    return Operand::Reg(dst);
+                }
                 self.push(match float {
                     true => Inst::FloatBinary {
                         op: *op,
@@ -7682,6 +7751,12 @@ impl<'a> Lowerer<'a> {
             (None, None) => {
                 let dst = self.dst(into);
                 self.push(match ty {
+                    _ if trait_ == INVERT => Inst::Binary {
+                        op: BinOp::Xor,
+                        dst,
+                        lhs,
+                        rhs: Operand::Imm(-1),
+                    },
                     Type::Float => Inst::FloatNeg { dst, src: lhs },
                     _ => Inst::Neg { dst, src: lhs },
                 });
@@ -10284,7 +10359,7 @@ impl<'a> Lowerer<'a> {
             expr.kind,
             ExprKind::BinOp { .. }
                 | ExprKind::UnaryOp {
-                    op: UnaryOp::UnaryAdd | UnaryOp::UnarySub,
+                    op: UnaryOp::UnaryAdd | UnaryOp::UnarySub | UnaryOp::Invert,
                     ..
                 }
         ) && matches!(self.span_type(expr.span), Some(Type::List(_)))
@@ -10838,7 +10913,11 @@ impl Fused {
                 let packs = match op {
                     BinOp::Add | BinOp::Sub | BinOp::Mul => true,
                     BinOp::Div => float,
-                    BinOp::Rem | BinOp::Pow | BinOp::DivUnchecked => false,
+                    BinOp::And | BinOp::Or | BinOp::Xor => !float,
+                    // a shift may fail partway through a group
+                    BinOp::Rem | BinOp::Pow | BinOp::DivUnchecked | BinOp::Shl | BinOp::Shr => {
+                        false
+                    }
                 };
                 packs && *node == float && lhs.packable(float) && rhs.packable(float)
             }
@@ -10896,13 +10975,21 @@ fn bin_op(op: Operator) -> BinOp {
         Operator::Divide => BinOp::Div,
         Operator::Modulo => BinOp::Rem,
         Operator::Power => BinOp::Pow,
+        Operator::BitAnd => BinOp::And,
+        Operator::BitOr => BinOp::Or,
+        Operator::BitXor => BinOp::Xor,
+        Operator::LShift => BinOp::Shl,
+        Operator::RShift => BinOp::Shr,
     }
 }
 
-/// Returns whether `ty` is a number or a string, whose operators are builtin whatever trait
-/// a bound calls them through.
+/// Returns whether `ty` is a number, a bool, or a string, whose operators are builtin whatever
+/// trait a bound calls them through.
 fn is_builtin_operand(ty: &Type) -> bool {
-    matches!(ty, Type::Int | Type::Float | Type::Str | Type::Bytes)
+    matches!(
+        ty,
+        Type::Int | Type::Float | Type::Bool | Type::Str | Type::Bytes
+    )
 }
 
 /// Returns the operator trait of `function`, such as `add` for `add.add`, if it is one and a

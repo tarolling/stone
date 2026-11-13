@@ -65,6 +65,17 @@ pub enum BinOp {
     /// zero where `Div` stops the program. Only code the compiler writes itself uses it, as the
     /// polynomials of `math.asin` do, and only [`Inst::FloatBinary`] has it.
     DivUnchecked,
+    /// The bits set in both ints, as `&` computes on ints and on bools, which are 0 or 1.
+    And,
+    /// The bits set in either int.
+    Or,
+    /// The bits set in exactly one int, which also gives `~x` as `x ^ -1`.
+    Xor,
+    /// `lhs` shifted left by the low 6 bits of `rhs`, as both processors shift. Lowering checks
+    /// the count and the result first, so `<<` fails as the interpreter's does.
+    Shl,
+    /// `lhs` shifted right by the low 6 bits of `rhs`, copying its sign bit in, so rounding down.
+    Shr,
 }
 
 /// A trigonometric function of the `math` module, as in [`Inst::Trig`].
@@ -1039,6 +1050,11 @@ fn bin_name(op: BinOp) -> &'static str {
         BinOp::Rem => "rem",
         BinOp::Pow => "pow",
         BinOp::DivUnchecked => "div_unchecked",
+        BinOp::And => "and",
+        BinOp::Or => "or",
+        BinOp::Xor => "xor",
+        BinOp::Shl => "shl",
+        BinOp::Shr => "shr",
     }
 }
 

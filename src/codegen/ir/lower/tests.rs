@@ -2094,3 +2094,43 @@ fn a_call_on_a_trait_value_goes_through_its_types_table() {
         table.1
     );
 }
+
+#[test]
+fn a_shift_checks_its_count_unless_it_is_a_constant_in_range() {
+    let constant = dump("fn f(x: int) -> int:\n    ret x >> 3\n");
+    assert!(
+        constant.contains("  v1 = shr v0, 3\n  ret v1\n"),
+        "{constant}"
+    );
+    assert!(!constant.contains("fail"), "{constant}");
+    let counted = dump("fn f(x: int, n: int) -> int:\n    ret x >> n\n");
+    assert_eq!(
+        counted
+            .matches("fail \"shift count out of range (count {})\", v1")
+            .count(),
+        2,
+        "{counted}"
+    );
+    let out_of_range = dump("fn f(x: int) -> int:\n    ret x >> 64\n");
+    assert!(out_of_range.contains("(count {})\", 64"), "{out_of_range}");
+}
+
+#[test]
+fn a_left_shift_checks_that_shifting_back_gives_its_value() {
+    let ir = dump("fn f(x: int) -> int:\n    ret x << 4\n");
+    for wanted in [
+        "  v2 = shl v0, 4\n  v3 = shr v2, 4\n  br_eq v3, v0 -> ",
+        "  fail \"integer overflow in shift\"\n",
+        "  v1 = copy v2\n  ret v1\n",
+    ] {
+        assert!(ir.contains(wanted), "{wanted:?} in {ir}");
+    }
+}
+
+#[test]
+fn invert_is_an_exclusive_or_with_every_bit() {
+    let ir = dump("fn f(x: int) -> int:\n    ret ~x & 0xff | x ^ 1\n");
+    for wanted in ["xor v0, -1", "and v1, 255", "xor v0, 1", "or v2, v3"] {
+        assert!(ir.contains(wanted), "{wanted:?} in {ir}");
+    }
+}

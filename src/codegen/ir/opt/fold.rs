@@ -258,6 +258,12 @@ pub(super) fn evaluate(inst: &Inst) -> Option<i64> {
             BinOp::Pow if b < 0 => None,
             BinOp::Pow => Some(crate::stdlib::int_pow(a, b)),
             BinOp::DivUnchecked => None,
+            BinOp::And => Some(a & b),
+            BinOp::Or => Some(a | b),
+            BinOp::Xor => Some(a ^ b),
+            // the count's low 6 bits, as the processors take it
+            BinOp::Shl => Some(a.wrapping_shl(b as u32)),
+            BinOp::Shr => Some(a.wrapping_shr(b as u32)),
         },
         Inst::FloatBinary {
             op,
@@ -272,8 +278,15 @@ pub(super) fn evaluate(inst: &Inst) -> Option<i64> {
                 BinOp::Mul => bits(a * b),
                 BinOp::Div if b == 0.0 => None,
                 BinOp::Div | BinOp::DivUnchecked => bits(a / b),
-                // the remainder and power take their own routines, not folded here
-                BinOp::Rem | BinOp::Pow => None,
+                // the remainder and power take their own routines, not folded here, and floats
+                // have no bitwise operations
+                BinOp::Rem
+                | BinOp::Pow
+                | BinOp::And
+                | BinOp::Or
+                | BinOp::Xor
+                | BinOp::Shl
+                | BinOp::Shr => None,
             }
         }
         Inst::Neg {

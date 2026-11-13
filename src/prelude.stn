@@ -75,6 +75,31 @@ pub trait rem[R]:
 pub trait neg:
     fn neg(self) -> Self
 
+// Values that `&` combines, as `add` is for `+`, as in `impl bitand[Flags] for Flags:`. `int`
+// and `bool` implement it.
+pub trait bitand[R]:
+    fn bitand(self, other: R) -> Self
+
+// Values that `|` combines, as `add` is for `+`. `int` and `bool` implement it.
+pub trait bitor[R]:
+    fn bitor(self, other: R) -> Self
+
+// Values that `^` combines, as `add` is for `+`. `int` and `bool` implement it.
+pub trait bitxor[R]:
+    fn bitxor(self, other: R) -> Self
+
+// Values that `<<` shifts, as `add` is for `+`. `int` implements it.
+pub trait shl[R]:
+    fn shl(self, other: R) -> Self
+
+// Values that `>>` shifts, as `add` is for `+`. `int` implements it.
+pub trait shr[R]:
+    fn shr(self, other: R) -> Self
+
+// Values that `~x` inverts. `int` implements it.
+pub trait invert:
+    fn invert(self) -> Self
+
 // How a value of type `T` becomes a value of the implementing type, which `Type(value)` calls,
 // as in `Fahrenheit(c)` after `impl from[Celsius] for Fahrenheit:`. Every type converts from
 // itself, every value to `str` through `display`, and an `int` to a `float`.

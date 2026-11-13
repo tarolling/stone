@@ -1,0 +1,5 @@
+// each element is shifted in turn, so element 2 overflows before element 3's count is checked
+xs = [1, 2, 3, 4]
+counts = [61, 61, 62, 99]
+print(xs << [1, 1, 1, 1])
+print(xs << counts)

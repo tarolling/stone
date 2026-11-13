@@ -87,8 +87,8 @@ module's name in a `use` or before a `.`.
 
 | literal | examples |
 | --- | --- |
-| int | `0`, `42`, `9223372036854775807` |
-| float | `1.5`, `2.5e-3`, `1e9`, `1E+9` |
+| int | `0`, `42`, `9223372036854775807`, `1_000_000`, `0xff`, `0o17`, `0b1010` |
+| float | `1.5`, `2.5e-3`, `1e9`, `1E+9`, `1_000.5` |
 | string | `"hello"`, `""`, `"x is {x}"` |
 | bytes | `b"GET"`, `b""`, `b"\x00\xff"` |
 | bool | `true`, `false` |
@@ -100,7 +100,11 @@ module's name in a `use` or before a `.`.
 | tuple | `(1, "a")`, `(x, y, z,)`, `(1, ("a", [2.5]))` |
 | struct | `Point(x=1.0, y=2.0)`, `Line(end=q, start=p)` |
 
-Negative numbers are the unary `-` applied to a literal, as in `-7`. Strings use double quotes
+Negative numbers are the unary `-` applied to a literal, as in `-7`. An int written with `0x`,
+`0o`, or `0b` (or `0X`, `0O`, `0B`) is in hexadecimal, octal, or binary, and must fit in an int,
+as every int literal must, so `0x7fff_ffff_ffff_ffff` is the largest. A `_` may stand between
+two digits of any number, or right after a base prefix, as in Python, so `1_000` and `0x_ff`
+are numbers, while `1__000` and `1_` are errors. Strings use double quotes
 and must close on the line they open on. A backslash starts an escape sequence:
 
 | escape | means |
@@ -204,8 +208,8 @@ modules included, and a package's tests are left out of the programs that use it
 
 ## Augmented assignment
 
-`x op= v`, where `op=` is one of `+=`, `-=`, `*=`, `/=`, `%=`, and `**=`, means
-`x = x op v`, with the same types and errors as `op`:
+`x op= v`, where `op=` is one of `+=`, `-=`, `*=`, `/=`, `%=`, `**=`, `&=`, `|=`, `^=`, `<<=`,
+and `>>=`, means `x = x op v`, with the same types and errors as `op`:
 
 ```stone
 total = 0
@@ -265,9 +269,13 @@ From lowest to highest precedence:
 | `and` | `bool` conditions |
 | `not` | a `bool` condition |
 | `==` `!=` `<` `<=` `>` `>=` `in` `not in` | numbers, strings, bytes, and structs that implement `ord`; `==` and `!=` also bools, tuples, structs, options, and enums; `in` and `not in` a value and a map, list, string, or bytes |
+| `\|` | two ints or two bools, or lists of ints; a struct or type parameter that implements `bitor` |
+| `^` | two ints or two bools, or lists of ints; a struct or type parameter that implements `bitxor` |
+| `&` | two ints or two bools, or lists of ints; a struct or type parameter that implements `bitand` |
+| `<<` `>>` | an int and a count from 0 to 63, or lists of them; a struct or type parameter that implements `shl` or `shr` |
 | `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings or two bytes; a struct or type parameter that implements `add` or `sub` |
 | `*` `/` `%` | two ints or two floats, or lists of them; a struct or type parameter that implements `mul`, `div`, or `rem` |
-| unary `+` `-` | an int or a float, or a list of them; for `-`, a struct or type parameter that implements `neg` |
+| unary `+` `-` `~` | an int or a float, or a list of them (`~` ints only); for `-` and `~`, a struct or type parameter that implements `neg` or `invert` |
 | `**` | an int or float base and an `int` exponent, or lists of them |
 | calls `f(x)`, method calls `xs.len()`, fields `p.x`, indexing `xs[i]`, slicing `xs[i:j:k]`, `?` | `?`: a result or an option, in a function that returns one |
 
@@ -282,6 +290,15 @@ compares them, or the string `c` the text `x`, and `x not in c` is its opposite,
 `x in xs == b` is an error, written `(x in xs) == b` instead.
 `**` groups right to left and binds tighter than a unary sign on its left, as in Python, so
 `2 ** 3 ** 2 == 512` and `-2 ** 2 == -4`, while `2 ** -1` raises to `-1`.
+The bitwise operators bind as in Python, looser than arithmetic and tighter than comparisons,
+so `a & b == c` means `(a & b) == c`, `x & 1 + 1` means `x & 2`, and `~x` binds like `-x`.
+On ints they work on the 64 bits of two's complement: `6 & 3 == 2`, `6 | 3 == 7`,
+`6 ^ 3 == 5`, and `~5 == -6`. On bools, `&`, `|`, and `^` give a bool and, unlike `and` and
+`or`, always evaluate both sides. `x << n` and `x >> n` shift by a count `n` from 0 to 63, and
+any other count stops the program with `shift count out of range (count 64)`. `>>` rounds
+down, as in Python, so `-7 >> 1 == -4`, and `<<` stops the program with
+`integer overflow in shift` when the result does not fit in an int, so `1 << 62` is fine but
+`1 << 63` fails, while `-1 << 63` is the smallest int. (Unlike `<<`, `+` and `*` wrap.)
 Parentheses group as usual. Operands are evaluated left to right.
 On a struct, an arithmetic operator calls its trait's method with the left operand as `self`,
 so `a + b` is `a.add(b)` (see [Types](types.md#operator-traits)).

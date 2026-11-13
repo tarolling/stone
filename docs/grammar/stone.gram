@@ -7,8 +7,10 @@
 # stone comments run from '//' to the end of the line and are dropped by the lexer, along with blank
 # lines, so neither ever produces NEWLINE, INDENT, or DEDENT.
 
-# NUMBER is an int literal such as 42, or a float literal such as 1.5, 1e3, or 2.5e-3. A float
-# needs a digit after its '.' and after its 'e' and optional sign, so 1. lexes as NUMBER '.'.
+# NUMBER is an int literal such as 42, 0xff, 0o17, or 0b1010, or a float literal such as 1.5,
+# 1e3, or 2.5e-3. A float needs a digit after its '.' and after its 'e' and optional sign, so 1.
+# lexes as NUMBER '.'. A '_' may stand between two digits or right after a base prefix, as in
+# 1_000_000 or 0x_ff.
 
 # General grammatical elements and rules:
 #
@@ -114,7 +116,7 @@ single_target:
     | NAME
 
 augassign:
-    | '+=' | '-=' | '*=' | '/=' | '%=' | '**='
+    | '+=' | '-=' | '*=' | '/=' | '%=' | '**=' | '&=' | '|=' | '^=' | '<<=' | '>>='
 
 return_stmt:
     | 'ret' [expressions] 
@@ -325,7 +327,7 @@ inversion:
 # chains such as a < b <= c mean a < b and b <= c, evaluating b once; the checker rejects a
 # chain with 'in' or 'not in' in it
 comparison:
-    | sum (compare_op sum)*
+    | bitwise_or (compare_op bitwise_or)*
 
 compare_op:
     | '=='
@@ -336,6 +338,23 @@ compare_op:
     | '>='
     | 'in'
     | 'not' 'in'
+
+# Bitwise operators
+# -----------------
+
+# as in Python, looser than arithmetic and tighter than comparisons, so a & b == c is
+# (a & b) == c; a '|' here follows a value, so it never starts a lambdef
+bitwise_or:
+    | bitwise_xor ('|' bitwise_xor)*
+
+bitwise_xor:
+    | bitwise_and ('^' bitwise_and)*
+
+bitwise_and:
+    | shift_expr ('&' shift_expr)*
+
+shift_expr:
+    | sum (('<<'|'>>') sum)*
 
 # Arithmetic operators
 # --------------------
@@ -349,6 +368,7 @@ term:
 factor:
     | '+' factor 
     | '-' factor 
+    | '~' factor 
     | power
 
 power:

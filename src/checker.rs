@@ -328,18 +328,26 @@ pub const ORD: &str = "ord";
 /// text, which every type implements, and a struct may implement itself.
 pub const DISPLAY: &str = "display";
 
-/// The names of the prelude's traits that back `+`, `-`, `*`, `/`, and `%`, each generic over
-/// the right operand's type and called with the left operand as `self`, and of `neg`, which
-/// backs `-x`.
+/// The names of the prelude's traits that back `+`, `-`, `*`, `/`, `%`, `&`, `|`, `^`, `<<`, and
+/// `>>`, each generic over the right operand's type and called with the left operand as `self`,
+/// and of `neg` and `invert`, which back `-x` and `~x`.
 pub const ADD: &str = "add";
 pub const SUB: &str = "sub";
 pub const MUL: &str = "mul";
 pub const DIV: &str = "div";
 pub const REM: &str = "rem";
 pub const NEG: &str = "neg";
+pub const BITAND: &str = "bitand";
+pub const BITOR: &str = "bitor";
+pub const BITXOR: &str = "bitxor";
+pub const SHL: &str = "shl";
+pub const SHR: &str = "shr";
+pub const INVERT: &str = "invert";
 
 /// Every trait of [`operator_trait`], each also the name of its one method.
-pub const OPERATOR_TRAITS: &[&str] = &[ADD, SUB, MUL, DIV, REM, NEG];
+pub const OPERATOR_TRAITS: &[&str] = &[
+    ADD, SUB, MUL, DIV, REM, NEG, BITAND, BITOR, BITXOR, SHL, SHR, INVERT,
+];
 
 /// Returns the prelude trait an arithmetic operator calls on a value that is not a builtin
 /// number or string, which is also the name of its method, or `None` for `**` and unary `+`,
@@ -357,11 +365,28 @@ pub fn operator_trait(op: Operator, unary: bool) -> Option<&'static str> {
         (Operator::Divide, _) => DIV,
         (Operator::Modulo, _) => REM,
         (Operator::Power, _) => return None,
+        (Operator::BitAnd, _) => BITAND,
+        (Operator::BitOr, _) => BITOR,
+        (Operator::BitXor, _) => BITXOR,
+        (Operator::LShift, _) => SHL,
+        (Operator::RShift, _) => SHR,
     })
 }
 
+/// Returns the prelude trait a unary operator calls on a value that is not a builtin number,
+/// or `None` for `not` and `+`.
+///
+/// For example, `unary_trait(UnaryOp::Invert)` (`~x`) is `Some("invert")`.
+pub fn unary_trait(op: UnaryOp) -> Option<&'static str> {
+    match op {
+        UnaryOp::UnarySub => Some(NEG),
+        UnaryOp::Invert => Some(INVERT),
+        UnaryOp::Not | UnaryOp::UnaryAdd => None,
+    }
+}
+
 /// Returns the binary operator whose trait is `trait_`, the reverse of [`operator_trait`], or
-/// `None` for `neg`, which backs unary `-`, and for any other trait.
+/// `None` for `neg` and `invert`, which back unary `-` and `~`, and for any other trait.
 ///
 /// For example, `trait_operator("mul")` is `Some(Operator::Multiply)`.
 pub fn trait_operator(trait_: &str) -> Option<Operator> {
@@ -371,24 +396,42 @@ pub fn trait_operator(trait_: &str) -> Option<Operator> {
         MUL => Operator::Multiply,
         DIV => Operator::Divide,
         REM => Operator::Modulo,
+        BITAND => Operator::BitAnd,
+        BITOR => Operator::BitOr,
+        BITXOR => Operator::BitXor,
+        SHL => Operator::LShift,
+        SHR => Operator::RShift,
         _ => return None,
     })
 }
 
+/// Returns whether `trait_` is one of the operator traits of the bitwise operators, which only
+/// `int` implements, and `bool` too for `&`, `|`, and `^`.
+fn bitwise_trait(trait_: &str) -> bool {
+    [BITAND, BITOR, BITXOR, SHL, SHR, INVERT].contains(&trait_)
+}
+
 /// Returns whether `ty` implements the operator trait `trait_` with the type arguments `args`
-/// without a program's impl: `int` and `float` implement every one with their own type, and
-/// `str` and `bytes` implement `add` with theirs, which joins them.
+/// without a program's impl: `int` implements every one with its own type, `float` the
+/// arithmetic ones, `bool` `bitand`, `bitor`, and `bitxor`, and `str` and `bytes` implement
+/// `add` with theirs, which joins them.
 ///
 /// For example, `builtin_operator(&Type::Str, "add", &[Type::Str])` is true, and
-/// `builtin_operator(&Type::Int, "add", &[Type::Float])` is false.
+/// `builtin_operator(&Type::Int, "add", &[Type::Float])` and
+/// `builtin_operator(&Type::Float, "shl", &[Type::Float])` are false.
 pub fn builtin_operator(ty: &Type, trait_: &str, args: &[Type]) -> bool {
-    let numbers = matches!(ty, Type::Int | Type::Float) && OPERATOR_TRAITS.contains(&trait_);
-    let joins = matches!(ty, Type::Str | Type::Bytes) && trait_ == ADD;
+    let implements = match ty {
+        Type::Int => OPERATOR_TRAITS.contains(&trait_),
+        Type::Float => OPERATOR_TRAITS.contains(&trait_) && !bitwise_trait(trait_),
+        Type::Bool => [BITAND, BITOR, BITXOR].contains(&trait_),
+        Type::Str | Type::Bytes => trait_ == ADD,
+        _ => false,
+    };
     let own = match trait_ {
-        NEG => args.is_empty(),
+        NEG | INVERT => args.is_empty(),
         _ => matches!(args, [arg] if arg == ty),
     };
-    (numbers || joins) && own
+    implements && own
 }
 
 /// The name of the prelude's trait of conversions that cannot fail, which `Type(value)` calls.
@@ -1245,6 +1288,12 @@ impl ArithmeticOp {
             ArithmeticOp::Binary(Operator::Divide) => "/",
             ArithmeticOp::Binary(Operator::Modulo) => "%",
             ArithmeticOp::Binary(Operator::Power) => "**",
+            ArithmeticOp::Binary(Operator::BitAnd) => "&",
+            ArithmeticOp::Binary(Operator::BitOr) => "|",
+            ArithmeticOp::Binary(Operator::BitXor) => "^",
+            ArithmeticOp::Binary(Operator::LShift) => "<<",
+            ArithmeticOp::Binary(Operator::RShift) => ">>",
+            ArithmeticOp::Unary(UnaryOp::Invert) => "~",
             ArithmeticOp::Unary(UnaryOp::Not) => "not",
         }
     }
@@ -1296,6 +1345,35 @@ impl Kind {
 
 /// The kinds arithmetic accepts, with `int` the default.
 const NUMBERS: &[Kind] = &[Kind::Int, Kind::Float];
+/// The kinds `<<`, `>>`, and `~` accept, and that the elements of a list must be for any bitwise
+/// operator.
+const INTS: &[Kind] = &[Kind::Int];
+/// The kinds `&`, `|`, and `^` accept.
+const BITS: &[Kind] = &[Kind::Int, Kind::Bool];
+
+/// Returns the kinds two operands of the binary operator `op` (other than `**`) may be, and the
+/// error for one that is not.
+///
+/// For example, `binary_operands(Operator::BitAnd)` gives `int` and `bool`.
+fn binary_operands(op: Operator) -> (&'static [Kind], &'static str) {
+    match op {
+        Operator::Add => (
+            &[Kind::Int, Kind::Float, Kind::Str, Kind::Bytes],
+            "'+' needs int, float, str, or bytes operands, found {}",
+        ),
+        Operator::Subtract => (NUMBERS, "'-' needs int or float operands, found {}"),
+        Operator::Multiply => (NUMBERS, "'*' needs int or float operands, found {}"),
+        Operator::Divide => (NUMBERS, "'/' needs int or float operands, found {}"),
+        Operator::Modulo => (NUMBERS, "'%' needs int or float operands, found {}"),
+        Operator::Power => (NUMBERS, "'**' needs int or float operands, found {}"),
+        Operator::BitAnd => (BITS, "'&' needs int or bool operands, found {}"),
+        Operator::BitOr => (BITS, "'|' needs int or bool operands, found {}"),
+        Operator::BitXor => (BITS, "'^' needs int or bool operands, found {}"),
+        Operator::LShift => (INTS, "'<<' needs int operands, found {}"),
+        Operator::RShift => (INTS, "'>>' needs int operands, found {}"),
+    }
+}
+
 /// The kinds ordering comparisons accept: numbers, and strings and bytes, which compare byte by
 /// byte.
 const ORDERED: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str, Kind::Bytes];
@@ -2332,10 +2410,19 @@ impl Inference {
             return;
         }
         let strings = op.op == ArithmeticOp::Binary(Operator::Add);
+        // two unknown operands of `&`, `|`, or `^` may both be bools, which no bound admits
+        let bits = matches!(
+            op.op,
+            ArithmeticOp::Binary(Operator::BitAnd | Operator::BitOr | Operator::BitXor)
+        );
         match &op.right {
             Some(_) if op.op == ArithmeticOp::Binary(Operator::Power) => {
                 self.bound_operand(&op.left, None, false);
             }
+            Some(right)
+                if bits
+                    && matches!(self.shallow(&op.left), Ty::Var(_))
+                    && matches!(self.shallow(right), Ty::Var(_)) => {}
             Some(right) => {
                 self.bound_operand(&op.left, Some(right), strings);
                 self.bound_operand(right, Some(&op.left), strings);
@@ -2357,25 +2444,27 @@ impl Inference {
         let symbol = op.op.symbol();
         let left = self.shallow(&op.left);
         let Some(right) = &op.right else {
-            // `-v` negates a struct or type parameter through its `neg`
-            if op.op == ArithmeticOp::Unary(UnaryOp::UnarySub)
+            // `-v` negates a struct or type parameter through its `neg`, and `~v` its `invert`
+            if let ArithmeticOp::Unary(unary) = op.op
+                && let Some(trait_) = unary_trait(unary)
                 && matches!(left, Ty::Struct(..) | Ty::Param(_))
             {
-                return self.solve_operator(op, NEG, &left, None, force);
+                return self.solve_operator(op, trait_, &left, None, force);
             }
-            // `+x` or `-x`
+            // `+x`, `-x`, or `~x`
             match &left {
                 Ty::Var(_) if !force => return false,
                 Ty::List(elem) => self.require_elements((**elem).clone(), symbol, op.operand_span),
                 _ => {
-                    let message = match symbol {
-                        "+" => "'+' needs an int or float operand, found {}",
-                        _ => "'-' needs an int or float operand, found {}",
+                    let (allowed, message) = match symbol {
+                        "+" => (NUMBERS, "'+' needs an int or float operand, found {}"),
+                        "~" => (INTS, "'~' needs an int operand, found {}"),
+                        _ => (NUMBERS, "'-' needs an int or float operand, found {}"),
                     };
                     self.require(
                         Code::WrongKind,
                         left.clone(),
-                        NUMBERS,
+                        allowed,
                         op.operand_span,
                         message,
                     );
@@ -2423,14 +2512,8 @@ impl Inference {
             .into_iter()
             .find(|t| matches!(t, Ty::Param(_)))
         {
-            let message = match symbol {
-                "+" => "'+' needs int, float, str, or bytes operands, found {}",
-                "-" => "'-' needs int or float operands, found {}",
-                "*" => "'*' needs int or float operands, found {}",
-                "/" => "'/' needs int or float operands, found {}",
-                _ => "'%' needs int or float operands, found {}",
-            };
-            self.require(Code::WrongKind, param.clone(), NUMBERS, op.span, message);
+            let (allowed, message) = binary_operands(operator);
+            self.require(Code::WrongKind, param.clone(), allowed, op.span, message);
             return true;
         }
         // a string, bool, or none is never a list, so an unknown other operand has its type
@@ -2520,17 +2603,7 @@ impl Inference {
                 let ArithmeticOp::Binary(operator) = op.op else {
                     unreachable!("unary operations are handled above")
                 };
-                let (allowed, message): (&'static [Kind], _) = match operator {
-                    Operator::Add => (
-                        &[Kind::Int, Kind::Float, Kind::Str, Kind::Bytes],
-                        "'+' needs int, float, str, or bytes operands, found {}",
-                    ),
-                    Operator::Subtract => (NUMBERS, "'-' needs int or float operands, found {}"),
-                    Operator::Multiply => (NUMBERS, "'*' needs int or float operands, found {}"),
-                    Operator::Divide => (NUMBERS, "'/' needs int or float operands, found {}"),
-                    Operator::Modulo => (NUMBERS, "'%' needs int or float operands, found {}"),
-                    Operator::Power => unreachable!("handled by solve_power"),
-                };
+                let (allowed, message) = binary_operands(operator);
                 // a tuple, enum, struct, or function is never an operand, whatever the other one is
                 if let Some(tuple) = [&left, &right].into_iter().find(|ty| {
                     matches!(
@@ -2755,15 +2828,39 @@ impl Inference {
 
     /// Requires the elements of a list that `symbol` works on element by element to be numbers.
     fn require_elements(&mut self, elem: Ty, symbol: &str, span: Span) {
-        let message = match symbol {
-            "+" => "'+' on lists needs int or float elements, found {}",
-            "-" => "'-' on lists needs int or float elements, found {}",
-            "*" => "'*' on lists needs int or float elements, found {}",
-            "/" => "'/' on lists needs int or float elements, found {}",
-            "%" => "'%' on lists needs int or float elements, found {}",
-            _ => "'**' on lists needs int or float elements, found {}",
+        let (allowed, message) = match symbol {
+            "+" => (
+                NUMBERS,
+                "'+' on lists needs int or float elements, found {}",
+            ),
+            "-" => (
+                NUMBERS,
+                "'-' on lists needs int or float elements, found {}",
+            ),
+            "*" => (
+                NUMBERS,
+                "'*' on lists needs int or float elements, found {}",
+            ),
+            "/" => (
+                NUMBERS,
+                "'/' on lists needs int or float elements, found {}",
+            ),
+            "%" => (
+                NUMBERS,
+                "'%' on lists needs int or float elements, found {}",
+            ),
+            "&" => (INTS, "'&' on lists needs int elements, found {}"),
+            "|" => (INTS, "'|' on lists needs int elements, found {}"),
+            "^" => (INTS, "'^' on lists needs int elements, found {}"),
+            "<<" => (INTS, "'<<' on lists needs int elements, found {}"),
+            ">>" => (INTS, "'>>' on lists needs int elements, found {}"),
+            "~" => (INTS, "'~' on lists needs int elements, found {}"),
+            _ => (
+                NUMBERS,
+                "'**' on lists needs int or float elements, found {}",
+            ),
         };
-        self.require(Code::WrongKind, elem, NUMBERS, span, message);
+        self.require(Code::WrongKind, elem, allowed, span, message);
     }
 
     /// Reports that `found` should have been `expected`, as [`Inference::expect`] does.
@@ -8078,7 +8175,7 @@ impl Inference {
                         self.require_condition(ty, operand.span);
                         Ty::Bool
                     }
-                    UnaryOp::UnaryAdd | UnaryOp::UnarySub => {
+                    UnaryOp::UnaryAdd | UnaryOp::UnarySub | UnaryOp::Invert => {
                         let result = self.fresh();
                         self.arithmetic(Arithmetic {
                             op: ArithmeticOp::Unary(*op),
@@ -10674,6 +10771,7 @@ impl Inference {
             }
             Ty::Int | Ty::Float | Ty::Str | Ty::Bytes if trait_ == ORD => true,
             Ty::Int | Ty::Float if trait_ == NEG => true,
+            Ty::Int if trait_ == INVERT => true,
             ty => {
                 ty_key(&ty).is_some_and(|key| self.impls.contains_key(&(trait_.to_string(), key)))
             }
@@ -10705,7 +10803,7 @@ impl Inference {
                 fallible == (bound.name == TRY_FROM)
             }
             ty if OPERATOR_TRAITS.contains(&bound.name.as_str())
-                && matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bytes) =>
+                && matches!(ty, Ty::Int | Ty::Float | Ty::Bool | Ty::Str | Ty::Bytes) =>
             {
                 let args: Vec<Type> = bound.args.iter().map(|a| self.finalize(a)).collect();
                 builtin_operator(&self.finalize(&ty), &bound.name, &args)

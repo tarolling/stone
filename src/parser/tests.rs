@@ -1892,6 +1892,11 @@ fn augmented_assignments_parse() {
         ("/=", Operator::Divide),
         ("%=", Operator::Modulo),
         ("**=", Operator::Power),
+        ("&=", Operator::BitAnd),
+        ("|=", Operator::BitOr),
+        ("^=", Operator::BitXor),
+        ("<<=", Operator::LShift),
+        (">>=", Operator::RShift),
     ] {
         assert_eq!(
             parsed(&format!("x {text} y + 1\n")),
@@ -3905,5 +3910,133 @@ fn a_test_block_is_top_level_with_a_plain_description() {
     assert_eq!(
         error_of("test \"adds\"\n    f()\n"),
         ("expected ':', found end of line".to_string(), 1, 12)
+    );
+}
+
+/// Builds the boxed expression `~operand`, for expected trees.
+fn invert(operand: Box<Expr>) -> Box<Expr> {
+    Box::new(
+        ExprKind::UnaryOp {
+            op: UnaryOp::Invert,
+            operand,
+        }
+        .into(),
+    )
+}
+
+#[test]
+fn bitwise_operators_bind_as_in_python() {
+    // `|` loosest, then `^`, then `&`, then shifts, then sums
+    assert_eq!(
+        expr_of("a | b ^ c & d << e + f\n"),
+        *binop(
+            name("a"),
+            Operator::BitOr,
+            binop(
+                name("b"),
+                Operator::BitXor,
+                binop(
+                    name("c"),
+                    Operator::BitAnd,
+                    binop(
+                        name("d"),
+                        Operator::LShift,
+                        binop(name("e"), Operator::Add, name("f"))
+                    )
+                )
+            )
+        )
+    );
+    // each is left-associative
+    assert_eq!(
+        expr_of("a >> b << c\n"),
+        *binop(
+            binop(name("a"), Operator::RShift, name("b")),
+            Operator::LShift,
+            name("c")
+        )
+    );
+    assert_eq!(
+        expr_of("a & b & c\n"),
+        *binop(
+            binop(name("a"), Operator::BitAnd, name("b")),
+            Operator::BitAnd,
+            name("c")
+        )
+    );
+}
+
+#[test]
+fn comparisons_bind_looser_than_bitwise_operators() {
+    assert_eq!(
+        expr_of("a & b == c | d\n"),
+        ExprKind::Compare {
+            left: binop(name("a"), Operator::BitAnd, name("b")),
+            ops: vec![CompOp::Equal],
+            comparators: vec![*binop(name("c"), Operator::BitOr, name("d"))],
+        }
+        .into()
+    );
+    assert_eq!(
+        expr_of("x in a | b\n"),
+        ExprKind::Compare {
+            left: name("x"),
+            ops: vec![CompOp::In],
+            comparators: vec![*binop(name("a"), Operator::BitOr, name("b"))],
+        }
+        .into()
+    );
+}
+
+#[test]
+fn invert_binds_like_unary_minus() {
+    assert_eq!(
+        expr_of("~a & -b\n"),
+        *binop(invert(name("a")), Operator::BitAnd, negate(name("b")))
+    );
+    assert_eq!(
+        expr_of("~2 ** 3\n"),
+        *invert(binop(int(2), Operator::Power, int(3)))
+    );
+    assert_eq!(expr_of("~~a\n"), *invert(invert(name("a"))));
+}
+
+#[test]
+fn a_lambda_body_may_use_binary_or() {
+    assert_eq!(
+        expr_of("|x| x | 1\n"),
+        lambda(&[("x", None)], binop(name("x"), Operator::BitOr, int(1)))
+    );
+    assert_eq!(
+        expr_of("f(|x| x | y, z)\n"),
+        ExprKind::Call {
+            func: name("f"),
+            args: vec![
+                lambda(&[("x", None)], binop(name("x"), Operator::BitOr, name("y"))),
+                *name("z"),
+            ],
+            keywords: vec![],
+        }
+        .into()
+    );
+}
+
+#[test]
+fn doubled_boolean_operators_hint_at_the_keywords() {
+    assert_eq!(
+        error_of("x = a && b\n"),
+        (
+            "use 'and' for a boolean and, or '&' for the bits of ints".to_string(),
+            1,
+            7
+        )
+    );
+    assert_eq!(
+        error_of("x = a || b\n"),
+        (
+            "use 'or' for a boolean or, or '|' for the bits of ints".to_string(),
+            1,
+            7
+        )
     );
 }

@@ -1097,12 +1097,13 @@ impl Parser {
         Ok(base)
     }
 
-    /// Parses a power with optional unary signs, such as `-x` or `+5`.
+    /// Parses a power with optional unary signs, such as `-x`, `+5`, or `~mask`.
     ///
     /// ```text
     /// factor:
     ///     | '+' factor
     ///     | '-' factor
+    ///     | '~' factor
     ///     | power
     /// ```
     pub(super) fn parse_factor(&mut self) -> ParseExprResult {
@@ -1129,6 +1130,20 @@ impl Parser {
             return Ok(Box::new(Expr::new(
                 ExprKind::UnaryOp {
                     op: UnaryOp::UnarySub,
+                    operand: factor,
+                },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
+        // '~' factor
+        if self.expect(TokenType::Operator("~")).is_some()
+            && let Ok(factor) = self.nested(Self::parse_factor)
+        {
+            return Ok(Box::new(Expr::new(
+                ExprKind::UnaryOp {
+                    op: UnaryOp::Invert,
                     operand: factor,
                 },
                 self.span_from(mark),
@@ -1287,6 +1302,121 @@ impl Parser {
         Err(self.error_here("parse_sum"))
     }
 
+    /// Parses a left-associative chain of `operand`s joined by the operators of `ops`, each a
+    /// token and the operator it means, such as `a << b >> c` for the shift operators.
+    fn parse_chain(
+        &mut self,
+        operand: fn(&mut Self) -> ParseExprResult,
+        ops: &[(TokenType, Operator)],
+    ) -> ParseExprResult {
+        let mut result = operand(self)?;
+        loop {
+            let mark = self.pos;
+            let Some(op) = ops
+                .iter()
+                .find(|(token, _)| self.expect_quietly(token.clone()).is_some())
+                .map(|(_, op)| *op)
+            else {
+                break;
+            };
+            let Ok(right) = operand(self) else {
+                self.pos = mark;
+                break;
+            };
+            let span = result.span.to(right.span);
+            result = Box::new(Expr::new(
+                ExprKind::BinOp {
+                    op,
+                    left: result,
+                    right,
+                },
+                span,
+            ));
+        }
+        Ok(result)
+    }
+
+    /// Parses shifts, such as `a << 2` or `a >> b << c`.
+    ///
+    /// ```text
+    /// shift_expr:
+    ///     | sum (('<<'|'>>') sum)*
+    /// ```
+    pub(super) fn parse_shift_expr(&mut self) -> ParseExprResult {
+        self.parse_chain(
+            Self::parse_sum,
+            &[
+                (TokenType::Operator("<<"), Operator::LShift),
+                (TokenType::Operator(">>"), Operator::RShift),
+            ],
+        )
+    }
+
+    /// Parses bitwise ands, such as `a & 0xff`.
+    ///
+    /// ```text
+    /// bitwise_and:
+    ///     | shift_expr ('&' shift_expr)*
+    /// ```
+    pub(super) fn parse_bitwise_and(&mut self) -> ParseExprResult {
+        self.parse_chain(
+            Self::parse_shift_expr,
+            &[(TokenType::Operator("&"), Operator::BitAnd)],
+        )
+    }
+
+    /// Parses bitwise exclusive ors, such as `a ^ b`.
+    ///
+    /// ```text
+    /// bitwise_xor:
+    ///     | bitwise_and ('^' bitwise_and)*
+    /// ```
+    pub(super) fn parse_bitwise_xor(&mut self) -> ParseExprResult {
+        self.parse_chain(
+            Self::parse_bitwise_and,
+            &[(TokenType::Operator("^"), Operator::BitXor)],
+        )
+    }
+
+    /// Parses bitwise ors, such as `a | b`. A `|` here comes after a value, so it never starts a
+    /// lambda, and `|x| x | 1` is a lambda whose body is `x | 1`.
+    ///
+    /// ```text
+    /// bitwise_or:
+    ///     | bitwise_xor ('|' bitwise_xor)*
+    /// ```
+    pub(super) fn parse_bitwise_or(&mut self) -> ParseExprResult {
+        let result = self.parse_chain(
+            Self::parse_bitwise_xor,
+            &[(TokenType::VBar, Operator::BitOr)],
+        )?;
+        self.hint_doubled_operator();
+        Ok(result)
+    }
+
+    /// Notes a hint when the tokens ahead are `&&` or `||`, which C and Rust write for `and` and
+    /// `or`, so `a && b` suggests `and` instead of reporting an unexpected `&`.
+    fn hint_doubled_operator(&mut self) {
+        let ahead = |offset: usize| self.tokens.get(self.pos + offset).map(|t| &t.r#type);
+        let message = match (ahead(0), ahead(1)) {
+            (Some(TokenType::Operator("&")), Some(TokenType::Operator("&"))) => {
+                "use 'and' for a boolean and, or '&' for the bits of ints"
+            }
+            (Some(TokenType::VBar), Some(TokenType::VBar)) => {
+                "use 'or' for a boolean or, or '|' for the bits of ints"
+            }
+            _ => return,
+        };
+        let span = self.tokens[self.pos]
+            .span
+            .to(self.tokens[self.pos + 1].span);
+        let mark = self.pos;
+        // the error is reported at the second token, where parsing stops
+        self.pos += 1;
+        self.hint(span, message);
+        self.pos = mark;
+    }
+
     /// Parses one comparison operator, such as `<=`.
     ///
     /// ```text
@@ -1318,22 +1448,22 @@ impl Parser {
             .map(|(_, op)| op)
     }
 
-    /// Parses a sum or a chain of comparisons between sums, such as `a < b <= c`, which means
+    /// Parses a value or a chain of comparisons between values, such as `a < b <= c`, which means
     /// `a < b and b <= c`.
     ///
     /// ```text
     /// comparison:
-    ///     | sum (compare_op sum)*
+    ///     | bitwise_or (compare_op bitwise_or)*
     /// ```
     pub(super) fn parse_comparison(&mut self) -> ParseExprResult {
-        let left = self.parse_sum()?;
+        let left = self.parse_bitwise_or()?;
 
         let mut ops = vec![];
         let mut comparators: Vec<Expr> = vec![];
         loop {
             let mark = self.pos;
             if let Some(op) = self.parse_compare_op()
-                && let Ok(right) = self.parse_sum()
+                && let Ok(right) = self.parse_bitwise_or()
             {
                 ops.push(op);
                 comparators.push(*right);

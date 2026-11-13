@@ -391,12 +391,15 @@ impl Spacer {
             TokenType::Operator("-" | "+") if previous.is_none_or(|p| !p.ends_value()) => {
                 Kind::Unary
             }
+            TokenType::Operator("~") => Kind::Unary,
             TokenType::Operator(_) | TokenType::Arrow => Kind::Binary,
             TokenType::Keyword("true" | "false" | "none") => Kind::Operand,
             TokenType::Keyword("fn") => Kind::FnType,
             TokenType::Keyword(_) => Kind::Keyword,
             TokenType::VBar if self.case => Kind::Binary,
             TokenType::VBar if self.top().in_bars => Kind::CloseBar,
+            // after a value, `|` is a binary or, as in `a | b` or a lambda's body `x | 1`
+            TokenType::VBar if previous.is_some_and(Kind::ends_value) => Kind::Binary,
             TokenType::VBar => Kind::OpenBar,
             TokenType::StringStart(_) => Kind::TextStart,
             TokenType::StringMiddle(_) => Kind::TextMiddle,
@@ -468,7 +471,7 @@ impl Spacer {
                     self.frames.pop();
                 }
             }
-            TokenType::VBar if !self.case => {
+            TokenType::VBar if matches!(kind, Kind::OpenBar | Kind::CloseBar) => {
                 let frame = self.top();
                 frame.in_bars = !frame.in_bars;
             }
@@ -504,6 +507,33 @@ mod tests {
         for (source, expected) in cases {
             assert_eq!(fmt(&format!("{source}\n")), format!("{expected}\n"));
         }
+    }
+
+    #[test]
+    fn bitwise_operators_are_spaced_like_arithmetic() {
+        lines(&[
+            ("x=a&b|c^d", "x = a & b | c ^ d"),
+            ("x=a<<2>>b", "x = a << 2 >> b"),
+            ("x=~a&~ b", "x = ~a & ~b"),
+            ("x = a & -b", "x = a & -b"),
+            ("x&=0xff", "x &= 0xff"),
+            ("x|=1", "x |= 1"),
+            ("x ^=  y", "x ^= y"),
+            ("x<<=1", "x <<= 1"),
+            ("x>>=1", "x >>= 1"),
+            ("y = 1_000|0b10", "y = 1_000 | 0b10"),
+        ]);
+    }
+
+    #[test]
+    fn a_bar_after_a_value_is_binary_or() {
+        lines(&[
+            ("f = |x|x|1", "f = |x| x | 1"),
+            ("f = | x : int | x|y", "f = |x: int| x | y"),
+            ("g(|x| x|m, |y|y)", "g(|x| x | m, |y| y)"),
+            ("h = || a|b", "h = || a | b"),
+            ("z = (a)|[b][0]", "z = (a) | [b][0]"),
+        ]);
     }
 
     #[test]

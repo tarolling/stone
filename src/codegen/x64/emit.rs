@@ -581,6 +581,9 @@ impl X64Generator {
                     }
                     (BinOp::Add, false) => "paddq",
                     (BinOp::Sub, false) => "psubq",
+                    (BinOp::And, false) => "pand",
+                    (BinOp::Or, false) => "por",
+                    (BinOp::Xor, false) => "pxor",
                     _ => return Err(format!("{op:?} cannot be packed")),
                 };
                 self.emit(&format!("\t{mnemonic}\t{dst}, {rhs}"));
@@ -656,6 +659,12 @@ impl X64Generator {
                     (BinOp::Add, false) => "vpaddq",
                     (BinOp::Sub, false) => "vpsubq",
                     (BinOp::Mul, false) if avx512 => "vpmullq",
+                    (BinOp::And, false) if avx512 => "vpandq",
+                    (BinOp::Or, false) if avx512 => "vporq",
+                    (BinOp::Xor, false) if avx512 => "vpxorq",
+                    (BinOp::And, false) => "vpand",
+                    (BinOp::Or, false) => "vpor",
+                    (BinOp::Xor, false) => "vpxor",
                     _ => return Err(format!("{op:?} cannot be packed")),
                 };
                 let dst = match (lhs_owned, rhs_owned) {
@@ -1133,8 +1142,10 @@ impl X64Generator {
                 let (dst, mut lhs, mut rhs) =
                     (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
                 // `a + b` is `b + a`, so the operand already in the destination can go first
-                if matches!(op, BinOp::Add | BinOp::Mul)
-                    && (rhs == dst || matches!(lhs, Value::Imm(_)))
+                if matches!(
+                    op,
+                    BinOp::Add | BinOp::Mul | BinOp::And | BinOp::Or | BinOp::Xor
+                ) && (rhs == dst || matches!(lhs, Value::Imm(_)))
                 {
                     std::mem::swap(&mut lhs, &mut rhs);
                 }
@@ -1152,11 +1163,26 @@ impl X64Generator {
                     (BinOp::Mul, Value::Imm(n)) if fits_i32(n) => {
                         self.emit(&format!("\timul\t{target}, {target}, {n}"))
                     }
+                    (BinOp::Xor, Value::Imm(-1)) => self.emit(&format!("\tnot\t{target}")),
+                    // the processor takes a count's low 6 bits, as `BinOp::Shl` does
+                    (BinOp::Shl | BinOp::Shr, Value::Imm(n)) => {
+                        let name = if *op == BinOp::Shl { "shl" } else { "sar" };
+                        self.emit(&format!("\t{name}\t{target}, {}", n & 63));
+                    }
+                    (BinOp::Shl | BinOp::Shr, _) => {
+                        let name = if *op == BinOp::Shl { "shl" } else { "sar" };
+                        self.load("rcx", rhs);
+                        self.emit(&format!("\t{name}\t{target}, cl"));
+                    }
                     _ => {
                         let name = match op {
                             BinOp::Add => "add",
                             BinOp::Sub => "sub",
                             BinOp::Mul => "imul",
+                            BinOp::And => "and",
+                            BinOp::Or => "or",
+                            BinOp::Xor => "xor",
+                            BinOp::Shl | BinOp::Shr => unreachable!("shifts are emitted above"),
                             BinOp::DivUnchecked => {
                                 return Err("int division is always checked".to_string());
                             }
@@ -1262,6 +1288,9 @@ impl X64Generator {
                     BinOp::Div | BinOp::DivUnchecked => "divsd",
                     BinOp::Rem | BinOp::Pow => {
                         return Err(format!("float {op:?} is emitted separately"));
+                    }
+                    BinOp::And | BinOp::Or | BinOp::Xor | BinOp::Shl | BinOp::Shr => {
+                        return Err(format!("floats have no {op:?}"));
                     }
                 };
                 // + and * give the same bits either way round (any nan prints as nan), so the

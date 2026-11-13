@@ -6,8 +6,8 @@
 //! it in place. [`live_after`] says which variables are still read after each statement, and
 //! [`last_uses`] which variables a statement uses for the last time.
 
-use crate::ast::{CompOp, Expr, ExprKind, Stmt, StmtKind, TypeExprKind, UnaryOp, target_names};
-use crate::checker::{NEG, collect_assigned, operator_trait};
+use crate::ast::{CompOp, Expr, ExprKind, Stmt, StmtKind, TypeExprKind, target_names};
+use crate::checker::{collect_assigned, operator_trait, unary_trait};
 use crate::span::Span;
 use crate::stdlib::{is_builtin, prelude_method};
 use std::collections::{HashMap, HashSet};
@@ -459,11 +459,8 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
             expr_names(left, out);
             expr_names(right, out);
         }
-        ExprKind::UnaryOp {
-            op: UnaryOp::UnarySub,
-            operand,
-        } => {
-            out.methods.push(NEG);
+        ExprKind::UnaryOp { op, operand } if unary_trait(*op).is_some() => {
+            out.methods.extend(unary_trait(*op));
             expr_names(operand, out);
         }
         ExprKind::UnaryOp { operand, .. }

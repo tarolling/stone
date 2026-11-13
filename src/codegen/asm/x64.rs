@@ -727,7 +727,7 @@ const UNARY: [(&str, u8, u8, u8); 8] = [
 
 /// SSE instructions written `op xmm, xmm/mem`, with their prefix and opcode: scalar doubles, then
 /// packed doubles and quadwords.
-const SSE: [(&str, u8, u8); 18] = [
+const SSE: [(&str, u8, u8); 20] = [
     ("addsd", 0xf2, 0x58),
     ("mulsd", 0xf2, 0x59),
     ("subsd", 0xf2, 0x5c),
@@ -746,6 +746,8 @@ const SSE: [(&str, u8, u8); 18] = [
     ("paddq", 0x66, 0xd4),
     ("psubq", 0x66, 0xfb),
     ("pxor", 0x66, 0xef),
+    ("pand", 0x66, 0xdb),
+    ("por", 0x66, 0xeb),
     ("punpcklqdq", 0x66, 0x6c),
 ];
 
@@ -1204,7 +1206,7 @@ fn encode(
 
 /// AVX instructions written `op dst, src1, src2/mem` on packed doubles or quadwords, with their
 /// opcode in the `0f` map under an implied `66` prefix.
-const AVX: [(&str, u8); 8] = [
+const AVX: [(&str, u8); 10] = [
     ("vaddpd", 0x58),
     ("vmulpd", 0x59),
     ("vsubpd", 0x5c),
@@ -1213,6 +1215,8 @@ const AVX: [(&str, u8); 8] = [
     ("vpaddq", 0xd4),
     ("vpsubq", 0xfb),
     ("vpxor", 0xef),
+    ("vpand", 0xdb),
+    ("vpor", 0xeb),
 ];
 
 /// Returns a vector register of `size` bytes or a memory operand of that size (or none written)
@@ -1339,7 +1343,7 @@ fn avx(mnemonic: &str, operands: &[Operand], decorations: Decorations) -> Result
 
 /// AVX-512 instructions written `op dst, src1, src2` on packed doubles or quadwords: each one's
 /// opcode map and opcode under an implied `66` prefix, all with EVEX.W1.
-const AVX512: [(&str, u8, u8); 9] = [
+const AVX512: [(&str, u8, u8); 11] = [
     ("vaddpd", 1, 0x58),
     ("vmulpd", 1, 0x59),
     ("vsubpd", 1, 0x5c),
@@ -1348,6 +1352,8 @@ const AVX512: [(&str, u8, u8); 9] = [
     ("vpaddq", 1, 0xd4),
     ("vpsubq", 1, 0xfb),
     ("vpxorq", 1, 0xef),
+    ("vpandq", 1, 0xdb),
+    ("vporq", 1, 0xeb),
     ("vpmullq", 2, 0x40),
 ];
 
@@ -1949,6 +1955,9 @@ mod tests {
             ("divpd xmm8, xmm9", "66 45 0f 5e c1"),
             ("paddq xmm3, xmm4", "66 0f d4 dc"),
             ("psubq xmm11, xmm12", "66 45 0f fb dc"),
+            ("pand xmm3, xmm4", "66 0f db dc"),
+            ("por xmm3, xmm15", "66 41 0f eb df"),
+            ("pxor xmm10, xmm4", "66 44 0f ef d4"),
             ("pxor xmm5, xmm5", "66 0f ef ed"),
             ("punpcklqdq xmm3, xmm3", "66 0f 6c db"),
             ("punpcklqdq xmm13, xmm13", "66 45 0f 6c ed"),
@@ -2003,6 +2012,8 @@ mod tests {
             ("vxorpd ymm3, ymm3, ymm3", "c5 e5 57 db"),
             ("vxorpd ymm9, ymm4, ymm11", "c4 41 5d 57 cb"),
             ("vpaddq ymm3, ymm4, ymm12", "c4 c1 5d d4 dc"),
+            ("vpand ymm3, ymm4, ymm5", "c5 dd db dd"),
+            ("vpor ymm13, ymm4, ymm15", "c4 41 5d eb ef"),
             ("vpsubq ymm3, ymm4, ymm12", "c4 c1 5d fb dc"),
             ("vpxor ymm3, ymm3, ymm3", "c5 e5 ef db"),
             ("vpxor ymm10, ymm10, ymm10", "c4 41 2d ef d2"),
@@ -2082,6 +2093,9 @@ mod tests {
             ("vdivpd zmm3, zmm4, zmm5", "62 f1 dd 48 5e dd"),
             ("vxorpd zmm3, zmm4, zmm5", "62 f1 dd 48 57 dd"),
             ("vpaddq zmm3, zmm4, zmm5", "62 f1 dd 48 d4 dd"),
+            ("vpandq zmm3, zmm4, zmm5", "62 f1 dd 48 db dd"),
+            ("vporq zmm13, zmm4, zmm15", "62 51 dd 48 eb ef"),
+            ("vpxorq zmm3, zmm14, zmm5", "62 f1 8d 48 ef dd"),
             ("vpsubq zmm12, zmm4, zmm13", "62 51 dd 48 fb e5"),
             ("vpxorq zmm3, zmm3, zmm3", "62 f1 e5 48 ef db"),
             ("vpmullq zmm3, zmm4, zmm5", "62 f2 dd 48 40 dd"),

@@ -1349,7 +1349,7 @@ impl Parser {
     ///
     /// ```text
     /// aug_assignment: single_target augassign expressions
-    /// augassign: '+=' | '-=' | '*=' | '/=' | '%=' | '**='
+    /// augassign: '+=' | '-=' | '*=' | '/=' | '%=' | '**=' | '&=' | '|=' | '^=' | '<<=' | '>>='
     /// ```
     pub(super) fn parse_aug_assignment(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
@@ -1373,7 +1373,7 @@ impl Parser {
     /// operator it applies (`Operator::Add`).
     ///
     /// ```text
-    /// augassign: '+=' | '-=' | '*=' | '/=' | '%=' | '**='
+    /// augassign: '+=' | '-=' | '*=' | '/=' | '%=' | '**=' | '&=' | '|=' | '^=' | '<<=' | '>>='
     /// ```
     fn parse_augassign(&mut self) -> Option<Operator> {
         let TokenType::Operator(text) = &self.peek().r#type else {
@@ -1386,6 +1386,11 @@ impl Parser {
             "/=" => Operator::Divide,
             "%=" => Operator::Modulo,
             "**=" => Operator::Power,
+            "&=" => Operator::BitAnd,
+            "|=" => Operator::BitOr,
+            "^=" => Operator::BitXor,
+            "<<=" => Operator::LShift,
+            ">>=" => Operator::RShift,
             _ => return None,
         };
         self.pos += 1;
@@ -1627,7 +1632,8 @@ impl Parser {
                 | TokenType::StringEnd(_) => depth -= 1,
                 TokenType::Operator(op) if depth == 0 => match *op {
                     "=" => assign = true,
-                    "+=" | "-=" | "*=" | "/=" | "%=" | "**=" => augmented = true,
+                    "+=" | "-=" | "*=" | "/=" | "%=" | "**=" | "&=" | "|=" | "^=" | "<<="
+                    | ">>=" => augmented = true,
                     _ => {}
                 },
                 _ => {}

@@ -194,6 +194,13 @@ fn same_width(regs: &[Reg]) -> Result<()> {
     Ok(())
 }
 
+/// Returns whether `and`, `orr`, and `eor` of x registers take `value` as an immediate.
+///
+/// For example, `0xff` and `-4096` are, but `0` and `0x1234` are not.
+pub fn logical_imm(value: i64) -> bool {
+    bitmask(value as u64, 64).is_some()
+}
+
 /// Returns the `N:immr:imms` fields that encode `value` as a logical immediate of `width`
 /// bits, if it is one: a repeating element of a rotated run of ones.
 ///
@@ -636,7 +643,8 @@ fn vreg(text: &str, arrangement: &str) -> Result<u32> {
 ///
 /// These are `ldr`/`str` of a `q` register at `[xN]`, the `.2d` forms of `fadd`, `fsub`,
 /// `fmul`, `fdiv`, `add`, `sub`, `fneg`, `neg`, `dup` from an x register, and `fcmeq` with
-/// `#0.0`, `addp` into a d register, and `mov` of a whole `.16b` register.
+/// `#0.0`, `addp` into a d register, and `mov`, `and`, `orr`, and `eor` of whole `.16b`
+/// registers.
 fn vector(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
     let first = operands.first()?;
     let q = first
@@ -669,6 +677,13 @@ fn vector(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
         let (rd, rn) = (d2(operands[0])?, d2(operands[1])?);
         Ok(base | rn << 5 | rd)
     };
+    // the bitwise operations, which take whole registers of bytes
+    let bytes = |base: u32| -> Result<u32> {
+        count(3)?;
+        let b16 = |text: &str| vreg(text, "16b");
+        let (rd, rn, rm) = (b16(operands[0])?, b16(operands[1])?, b16(operands[2])?);
+        Ok(base | rm << 16 | rn << 5 | rd)
+    };
     Some(match mnemonic {
         "ldr" | "str" => (|| {
             count(2)?;
@@ -700,6 +715,9 @@ fn vector(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
         "sub" => three(0x6ee08400),
         "fneg" => two(0x6ee0f800),
         "neg" => two(0x6ee0b800),
+        "and" => bytes(0x4e201c00),
+        "orr" => bytes(0x4ea01c00),
+        "eor" => bytes(0x6e201c00),
         "dup" => (|| {
             count(2)?;
             let rd = d2(operands[0])?;
@@ -769,7 +787,8 @@ fn is_sve(mnemonic: &str, operands: &[&str]) -> bool {
 /// as long as the processor's (`.d` elements only), returning `None` for anything else.
 ///
 /// These are `whilelo` of x registers, `ld1d`/`st1d` at `[xN, xM, lsl #3]`, the unpredicated
-/// `fadd`, `fsub`, `fmul`, `add`, `sub`, and SVE2's `mul`, the predicated `fdiv`, `fdivr`,
+/// `fadd`, `fsub`, `fmul`, `add`, `sub`, `and`, `orr`, `eor`, and SVE2's `mul`, the predicated
+/// `fdiv`, `fdivr`,
 /// `fneg`, and `neg`, `movprfx`, `dup` from an x register, `fcmeq` with `#0.0`, `ptest`, and
 /// `incd`.
 fn sve(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
@@ -849,6 +868,9 @@ fn sve(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
         "add" => three(0x04e00000),
         "sub" => three(0x04e00400),
         "mul" => three(0x04e06000),
+        "and" => three(0x04203000),
+        "orr" => three(0x04603000),
+        "eor" => three(0x04a03000),
         "fdiv" => destructive(0x65cd8000),
         "fdivr" => destructive(0x65cc8000),
         "fneg" => unary(0x04dda000),
@@ -1566,6 +1588,13 @@ mod tests {
             ("ldr d4, [x17, x20, lsl #3]", "fc747a24"),
             ("str d20, [x17, x11, lsl #3]", "fc2b7a34"),
             ("mov v16.16b, v17.16b", "4eb11e30"),
+            ("and v16.16b, v17.16b, v18.16b", "4e321e30"),
+            ("orr v31.16b, v16.16b, v20.16b", "4eb41e1f"),
+            ("eor v20.16b, v31.16b, v16.16b", "6e301ff4"),
+            ("and x3, x4, #-256", "9278dc83"),
+            ("eor x0, x1, #255", "d2401c20"),
+            ("mvn x5, x6", "aa2603e5"),
+            ("asr x1, x2, x3", "9ac32841"),
         ]);
     }
 
@@ -1587,6 +1616,9 @@ mod tests {
             ("sub z16.d, z17.d, z18.d", "04f20630"),
             ("mul z16.d, z17.d, z18.d", "04f26230"),
             ("mul z31.d, z3.d, z20.d", "04f4607f"),
+            ("and z16.d, z17.d, z18.d", "04323230"),
+            ("orr z31.d, z16.d, z20.d", "0474321f"),
+            ("eor z20.d, z31.d, z16.d", "04b033f4"),
             ("fdiv z16.d, p0/m, z16.d, z18.d", "65cd8250"),
             ("fdiv z31.d, p0/m, z31.d, z17.d", "65cd823f"),
             ("fdivr z18.d, p0/m, z18.d, z16.d", "65cc8212"),

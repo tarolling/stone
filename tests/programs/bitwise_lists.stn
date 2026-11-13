@@ -1,0 +1,24 @@
+// the bitwise operators element by element, at lengths that leave every size of tail after
+// the packed groups
+for n in range(18):
+    a = []
+    b = []
+    for i in range(n):
+        a.append(i * 37 + 5)
+        b.append(i * 11 - 7)
+    print(n, a & b, a | 0xf0, 0x0f ^ a, ~b, (a ^ b) & ~a | 3)
+    print(a << 2, b >> 1, 1 << (a & 31), a >> (b & 3))
+
+// written into the list itself when it is its last use
+xs = [0x1234, 0x5678, -1, 0]
+xs = xs & 0xff
+xs = xs | [1, 2, 3, 4]
+xs = ~xs
+xs = xs << 4
+xs = xs >> 2
+print(xs)
+ys = [1, 2, 3]
+ys &= [3, 3, 3]
+ys ^= 1
+ys <<= [1, 2, 3]
+print(ys)

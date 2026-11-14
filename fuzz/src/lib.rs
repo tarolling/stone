@@ -1233,17 +1233,26 @@ mod tests {
             .collect()
     }
 
-    /// Returns what `stone check` reports about `source`, but for the warnings of the lints the
-    /// generator sets off on purpose: a division by a zero worked out from literals, which
-    /// fails at run time as both backends must alike, and a map literal giving a key twice.
+    /// Returns the errors `stone check` reports about `source`, and the warnings of the lints
+    /// the checker itself reports, which the generator's rules keep programs from setting off
+    /// (`[x] * n`, a change that is lost, an unreachable `case`).
+    ///
+    /// The other lints are about style, and random code sets them off as a matter of course:
+    /// statements after a `ret`, `p == p`, `x = x`, a map literal giving a key twice, or a
+    /// division by a zero worked out from literals, which fails at run time as both backends
+    /// must alike. Those programs are still worth running.
     fn problems(source: &str) -> Vec<stone::diagnostic::Diagnostic> {
         use stone::explain::Lint;
-        let deliberate = [Lint::AlwaysFails.id(), Lint::DuplicateKey.id()];
+        let checked = [
+            Lint::ListRepetition.id(),
+            Lint::LostChange.id(),
+            Lint::UnreachableCase.id(),
+        ];
         stone::driver::check(source)
             .into_iter()
             .filter(|d| {
                 d.severity != stone::diagnostic::Severity::Warning
-                    || !d.code().is_some_and(|code| deliberate.contains(&code))
+                    || d.code().is_none_or(|code| checked.contains(&code))
             })
             .collect()
     }

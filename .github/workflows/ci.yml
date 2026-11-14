@@ -118,6 +118,10 @@ jobs:
       run: |
         rustup toolchain install nightly --profile minimal
         cargo install cargo-fuzz --locked
+    - name: Check the fuzz crate's formatting
+      run: cargo fmt --manifest-path fuzz/Cargo.toml --check
+    - name: Lint the fuzz crate
+      run: cargo clippy --manifest-path fuzz/Cargo.toml --all-targets -- -D warnings
     - name: Test the program generator
       run: cargo test --manifest-path fuzz/Cargo.toml
     - name: Build fuzz targets

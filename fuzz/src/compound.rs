@@ -293,6 +293,10 @@ pub(crate) struct Var {
     pub(crate) keys: Vec<String>,
 }
 
+/// A case of a generated `match`: its pattern, the names it binds with their types, and whether
+/// it covers all of its variant, as `("E0.V1(b3)", [("b3", Ty::Int)], true)`.
+type Case = (String, Vec<(String, Ty)>, bool);
+
 /// A value reachable from a variable through fields and list elements, such as `v1.x0[#]`, in
 /// which each `#` becomes an index from -2 to 1 when it is used.
 struct Path {
@@ -392,9 +396,11 @@ impl Generator {
     /// Returns the names of the values of variant `k` of `E<index>`, if it names them.
     fn variant_names(&self, index: usize, k: usize) -> Option<Vec<String>> {
         match &self.types[index] {
-            TypeDef::Enum { variants, named } if named[k] => {
-                Some((0..variants[k].len()).map(|j| field_name(index, k, j)).collect())
-            }
+            TypeDef::Enum { variants, named } if named[k] => Some(
+                (0..variants[k].len())
+                    .map(|j| field_name(index, k, j))
+                    .collect(),
+            ),
             _ => None,
         }
     }
@@ -1762,8 +1768,7 @@ impl Generator {
             true => u.int_in_range(1..=variants.len() - 1)?,
             false => variants.len(),
         };
-        // each case's pattern, what it binds, and whether it covers all of its variant
-        let mut cases: Vec<(String, Vec<(String, Ty)>, bool)> = vec![];
+        let mut cases: Vec<Case> = vec![];
         for &k in &order[..covered] {
             let (head, fields) = &variants[k];
             // a case for part of a variant goes before the case for all of it

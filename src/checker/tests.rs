@@ -54,6 +54,16 @@ fn type_of_symbol(source: &str, name: &str) -> String {
 
 #[test]
 fn every_example_and_test_program_checks_cleanly() {
+    // programs that test what a lint warns about on purpose, such as `t = t` keeping a string
+    // alive, with the lint each gets
+    const DELIBERATE: &[(&str, &str)] = &[
+        ("conversions.stn", "W0009"),
+        ("maps.stn", "W0013"),
+        ("memory_lists.stn", "W0012"),
+        ("memory_strings.stn", "W0012"),
+        ("sets.stn", "W0013"),
+        ("silent_lists.stn", "W0008"),
+    ];
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     for dir in ["examples", "tests/programs"] {
         for entry in std::fs::read_dir(root.join(dir)).unwrap() {
@@ -61,7 +71,16 @@ fn every_example_and_test_program_checks_cleanly() {
             if path.extension().is_some_and(|ext| ext == "stn") {
                 // linked, so a program can use the builtin os module
                 let source = std::fs::read_to_string(&path).unwrap();
-                assert_eq!(linked_errors(&source), [], "{}", path.display());
+                let name = path.file_name().unwrap().to_string_lossy();
+                let found: Vec<_> = crate::driver::analyze(&source)
+                    .diagnostics
+                    .into_iter()
+                    .filter(|d| {
+                        !DELIBERATE.contains(&(name.as_ref(), d.code().unwrap_or_default()))
+                    })
+                    .map(|d| (d.message, d.span.start.line, d.span.start.col))
+                    .collect();
+                assert_eq!(found, [], "{}", path.display());
             }
         }
     }

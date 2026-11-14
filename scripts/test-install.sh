@@ -13,7 +13,10 @@ set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
 binary="$root/target/debug/stone"
-[ -x "$binary" ] || { echo "error: $binary not found, run cargo build first" >&2; exit 1; }
+[ -x "$binary" ] || {
+    echo "error: $binary not found, run cargo build first" >&2
+    exit 1
+}
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
@@ -24,7 +27,7 @@ cp "$binary" "$root/LICENSE" "$root/README.md" "$work/package/"
 for target in x86_64-linux aarch64-linux x86_64-macos aarch64-macos; do
     archive="stone-$target.tar.gz"
     tar -czf "$work/release/$archive" -C "$work/package" stone LICENSE README.md
-    (cd "$work/release" && sha256sum "$archive" > "$archive.sha256")
+    (cd "$work/release" && sha256sum "$archive" >"$archive.sha256")
 done
 
 echo "test: installs and runs an example"
@@ -42,10 +45,10 @@ echo "test: stone uninstall removes the installed binary"
 
 echo "test: rejects a checksum mismatch"
 for checksum in "$work"/release/*.sha256; do
-    echo "0000000000000000000000000000000000000000000000000000000000000000  x" > "$checksum"
+    echo "0000000000000000000000000000000000000000000000000000000000000000  x" >"$checksum"
 done
 if STONE_DOWNLOAD_URL="file://$work/release" STONE_INSTALL_DIR="$work/bad" \
-    sh "$root/install.sh" 2> "$work/stderr"; then
+    sh "$root/install.sh" 2>"$work/stderr"; then
     echo "error: install.sh accepted a bad checksum" >&2
     exit 1
 fi
@@ -53,7 +56,7 @@ grep -q "checksum" "$work/stderr"
 [ ! -e "$work/bad/stone" ]
 
 echo "test: rejects an unknown option"
-if sh "$root/install.sh" --bogus 2> /dev/null; then
+if sh "$root/install.sh" --bogus 2>/dev/null; then
     echo "error: install.sh accepted --bogus" >&2
     exit 1
 fi

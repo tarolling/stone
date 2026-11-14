@@ -1167,7 +1167,7 @@ fn run_and_build_env(
 fn run_and_build_print_warnings_and_still_succeed() {
     let source =
         "fn push(xs: list[int], x: int):\n    xs.append(x)\n\nys = [1]\npush(ys, 2)\nprint(ys)\n";
-    let warning = "main.stn:2:5: warning: changes to 'xs' are lost when 'push' returns";
+    let warning = "main.stn:2:5: warning[W0004]: changes to 'xs' are lost when 'push' returns";
     for command in ["run", "build"] {
         let dir = project(&format!("warns_{command}"), &[("main.stn", source)]);
         let output = Command::new(env!("CARGO_BIN_EXE_stone"))
@@ -1199,9 +1199,9 @@ fn check_warns_about_unused_names_but_run_does_not() {
     assert_eq!(
         warnings,
         [
-            "main.stn:1:5: warning: 'math' is imported but never used",
-            "main.stn:3:17: warning: parameter 'h' is never used; remove it or name it '_h'",
-            "main.stn:6:1: warning: variable 'x' is never used; remove it or name it '_x'",
+            "main.stn:1:5: warning[W0002]: 'math' is imported but never used",
+            "main.stn:3:17: warning[W0001]: parameter 'h' is never used; remove it or name it '_h'",
+            "main.stn:6:1: warning[W0001]: variable 'x' is never used; remove it or name it '_x'",
         ]
     );
     let run = stone("run");

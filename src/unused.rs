@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind, is_lambda, is_test};
 use crate::checker::{Analysis, SymbolKind, struct_display};
 use crate::diagnostic::{Diagnostic, Severity};
+use crate::explain::Lint;
 use crate::project::Linked;
 use crate::span::{FileId, Span};
 
@@ -128,11 +129,11 @@ pub fn find(linked: &Linked, analysis: &Analysis) -> Vec<Diagnostic> {
             }
             _ => continue,
         };
-        warnings.push(Diagnostic::warning(symbol.span, message));
+        warnings.push(Lint::UnusedName.warning(symbol.span, message));
     }
     for import in &linked.imports {
         if !import.used && !skipped(import.name_span) && !import.name.starts_with('_') {
-            warnings.push(Diagnostic::warning(
+            warnings.push(Lint::UnusedImport.warning(
                 import.name_span,
                 format!("'{}' is imported but never used", import.name),
             ));

@@ -178,7 +178,6 @@ pub fn parse(source: str) -> result[value, str]:
                     key = keys.pop().unwrap()
                 else:
                     items = arrays.pop().unwrap()
-    ret ok(value.null)
 
 // Returns whether the bytes of `b` from `start` up to `end` are those of `s`.
 fn same(b: bytes, start: int, end: int, s: str) -> bool:
@@ -501,7 +500,6 @@ fn written(v: value, indent: int) -> str:
                 if indent >= 0:
                     out = line(out, indent, depth - 1)
                 out += "]"
-    ret out
 
 // Starts a new line of `out` indented `indent` spaces for each of `depth` levels.
 fn line(out: str, indent: int, depth: int) -> str:

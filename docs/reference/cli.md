@@ -222,11 +222,14 @@ stone clean examples/basics.stn   # removes examples/build
 stone clean                      # removes the current project's build
 ```
 
-## `stone check [--offline] [FILE]`
+## `stone check [--offline] [FILE] [--deny warnings]`
 
 Reports every syntax and type error without running the program (`FILE`, a directory's
 `main.stn` or `lib.stn`, or the program the current directory is in), and exits with status 1 if
-there are any. Warnings alone print but leave the status at 0.
+there are any. Warnings alone print but leave the status at 0, unless `--deny warnings` reports
+each as an error, so that CI fails on any. Each kind of warning is a [lint](lints.md), whose id a
+warning shows, as in `warning[W0004]`, and whose level a `[lints]` table in
+[`stone.toml`](manifest.md) sets.
 
 `check` also warns about everything the program defines but never uses: variables that are
 assigned but never read, parameters, functions, methods, structs, enums, traits, and imports.
@@ -241,11 +244,12 @@ A name that starts with `_` is never reported, which is how to keep one on purpo
   calls is reported only once that caller is gone.
 
 ```text
-main.stn:3:17: warning: parameter 'h' is never used; remove it or name it '_h'
+main.stn:3:17: warning[W0001]: parameter 'h' is never used; remove it or name it '_h'
 ```
 
 ```sh
 stone check examples/basics.stn
+stone check --deny warnings
 ```
 
 ## `stone explain CODE`
@@ -254,11 +258,14 @@ Explains the kind of error a code names, such as `E0005` in
 `main.stn:3:9: error[E0005]: expected int, found str`: what it means, then a program that fails
 with it and the same program fixed. `check`, `run`, and `build` end their errors with a line
 naming the command, as in ``For more about this error, try `stone explain E0005`.``
-[Error codes](errors.md) lists every code. An unknown code is an error that names the closest
+[Error codes](errors.md) lists every code. A lint's id, such as `W0004`, or its name, such as
+`lost_change`, explains the lint, with a program that gets the warning and the same program
+fixed; [Lints](lints.md) lists every lint. An unknown code is an error that names the closest
 one.
 
 ```sh
 stone explain E0005
+stone explain lost_change
 ```
 
 ## `stone test [PATH...] [--build] [--filter TEXT] [-j N] [--offline]`

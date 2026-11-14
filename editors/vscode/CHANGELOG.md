@@ -15,6 +15,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Constants (`const port = 53`): highlighting of `const`, hover with the constant's value, the
   outline and completion showing constants as constants (after a module's name too), and
   rename across every file.
+- Warnings show their lint's id, as `W0004`, linked to its explanation, and the levels of a
+  program's `[lints]` table in `stone.toml` apply: an allowed lint shows nothing, and a denied
+  one is an error. The new lints' suggested fixes, such as `x = 1` for `x == 1`, are quick fixes.
 
 ## [0.4.5] - 2026-11-12
 

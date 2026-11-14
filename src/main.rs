@@ -130,6 +130,10 @@ enum Command {
         /// Use only packages already downloaded.
         #[arg(long)]
         offline: bool,
+        /// Report every warning as an error, so that the check fails on any, as CI wants.
+        /// `warnings` is the only value.
+        #[arg(long, value_name = "warnings", value_parser = ["warnings"])]
+        deny: Option<String>,
     },
     /// Adds a package from a GitHub or GitLab release to the program in the current directory,
     /// naming it in `stone.toml` and downloading it.
@@ -181,9 +185,10 @@ enum Command {
         #[arg(long, value_name = "TAG")]
         version: Option<String>,
     },
-    /// Explains an error code, such as E0005, with an example of the error and its fix.
+    /// Explains an error code, such as E0005, or a lint, such as W0004 or lost_change, with an
+    /// example of the problem and its fix.
     Explain {
-        /// The code, as an error shows it, such as E0005.
+        /// The code, as an error or warning shows it, such as E0005 or W0004, or a lint's name.
         code: String,
     },
     /// Removes the stone binary.
@@ -210,6 +215,8 @@ enum ExecutionMode {
     Check {
         file: Option<String>,
         offline: bool,
+        /// Whether every warning is an error.
+        deny_warnings: bool,
     },
     Init {
         path: Option<PathBuf>,
@@ -282,7 +289,15 @@ fn main() -> ExitCode {
             windows_gui,
             offline,
         },
-        Some(Command::Check { file, offline }) => ExecutionMode::Check { file, offline },
+        Some(Command::Check {
+            file,
+            offline,
+            deny,
+        }) => ExecutionMode::Check {
+            file,
+            offline,
+            deny_warnings: deny.is_some(),
+        },
         Some(Command::Init {
             path,
             lib,
@@ -370,7 +385,11 @@ fn main() -> ExitCode {
         ExecutionMode::Fetch { path, locked } => deps::fetch(path.as_deref(), locked),
         ExecutionMode::Tree(path) => deps::tree(path.as_deref()),
         ExecutionMode::Init { path, options } => init(path.as_deref(), &options),
-        ExecutionMode::Check { file, offline } => {
+        ExecutionMode::Check {
+            file,
+            offline,
+            deny_warnings,
+        } => {
             let file = match entry(file.as_deref(), EntryUse::Any) {
                 Ok(file) => file,
                 Err(code) => return code,
@@ -381,6 +400,10 @@ fn main() -> ExitCode {
             deps::prepare(Path::new(&file), offline);
             let (sources, diagnostics) =
                 driver::check_program(Path::new(&file), &source, &FsSources);
+            let diagnostics = match deny_warnings {
+                true => stone::lint::deny_warnings(diagnostics),
+                false => diagnostics,
+            };
             // warnings alone still pass
             let rendered: String = diagnostics.iter().map(|d| sources.render(d)).collect();
             eprint!("{rendered}");
@@ -428,12 +451,20 @@ fn explain(code: &str) -> ExitCode {
         print!("{}", stone::explain::text(found));
         return ExitCode::SUCCESS;
     }
-    let ids = stone::explain::Code::ALL.iter().map(|c| c.id());
-    match stone::diagnostic::similar(code, ids) {
-        Some(like) => eprintln!("error: no error has the code '{code}'; did you mean '{like}'?"),
+    let codes = stone::explain::Code::ALL.iter().map(|c| c.id());
+    let lints = stone::explain::Lint::ALL.iter();
+    let names = codes
+        .chain(lints.clone().map(|lint| lint.id()))
+        .chain(lints.map(|lint| lint.name()));
+    match stone::diagnostic::similar(code, names) {
+        Some(like) => {
+            eprintln!("error: no error or lint has the code '{code}'; did you mean '{like}'?")
+        }
         None => eprintln!(
-            "error: no error has the code '{code}'; codes go from E0001 to {}",
-            stone::explain::Code::ALL.last().map_or("E0001", |c| c.id())
+            "error: no error or lint has the code '{code}'; errors go from E0001 to {}, and lints \
+             from W0001 to {}",
+            stone::explain::Code::ALL.last().map_or("E0001", |c| c.id()),
+            stone::explain::Lint::ALL.last().map_or("W0001", |l| l.id())
         ),
     }
     ExitCode::FAILURE

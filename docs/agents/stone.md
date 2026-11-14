@@ -29,7 +29,8 @@ in `.stn`.
 
 Errors print as `app.stn:3:7: error[E0005]: message`, with the source line and a caret under the
 problem, and exit with status 1. `stone explain E0005` explains a code with an example of the
-error and its fix. Warnings use the same format with `warning:`. The messages are
+error and its fix. Warnings use the same format with `warning[W0004]:`, a lint's id, which
+`stone explain W0004` explains too. The messages are
 written to be acted on: they usually say what to write instead, so read them before guessing.
 Runtime errors (an index out of range, `unwrap` of `none`, division by zero) print the same way
 under both `run` and `build`, followed by the calls that led there (`app.stn:9:7: called from
@@ -507,8 +508,8 @@ This prints `[15, 25] [10, 20]`: `backup` kept its own copy. The Python habit of
 mutates its argument and returns nothing gets this warning, and the change is lost:
 
 ```text
-warning: changes to 'xs' are lost when 'add' returns, since parameters are copies; return it and
-assign the result where 'add' is called
+warning[W0004]: changes to 'xs' are lost when 'add' returns, since parameters are copies; return
+it and assign the result where 'add' is called
 ```
 
 ## Rules the checker enforces

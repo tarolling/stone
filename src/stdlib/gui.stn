@@ -457,7 +457,6 @@ pub fn run[A: app](title: str, width: int, height: int, state: A) -> result[A, s
                 ret ok(state)
         c = state.draw(c)
         w.show(c)
-    ret ok(state)
 
 // The seconds between frames when the display does not pace them.
 const frame_time = 1.0 / 60.0

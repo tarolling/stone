@@ -17,8 +17,8 @@ num = { gitlab = "bob/num", version = "0.3" }
 geo = { path = "../geo" }
 ```
 
-A manifest holds two tables, `[package]` and `[dependencies]`, both optional. Any other key is an
-error, as is a key one of them does not hold, so a misspelling is caught.
+A manifest holds three tables, `[package]`, `[dependencies]`, and `[lints]`, all optional. Any
+other key is an error, as is a key one of them does not hold, so a misspelling is caught.
 
 ## [package]
 
@@ -53,6 +53,22 @@ A dependency from a host must give a `version`: the oldest version it works with
 newest version that any package of the program asks for, so this is a minimum, never a range or
 an exact pin. A directory has no version and no host, and a package from a host cannot depend on
 one. `host` is a host name, such as `gitlab.example.com`, without `https://`.
+
+## [lints]
+
+Each key is a [lint](lints.md)'s name, such as `unused_name`, and its value the level to report
+it at: `"allow"` (not at all), `"warn"` (as a warning, the default), or `"deny"` (as an error,
+which keeps the program from running or building and still shows the lint's id, as
+`error[W0001]`). The key `warnings` sets the level of every lint the table does not name.
+
+```toml
+[lints]
+warnings = "deny"
+unused_name = "warn"
+```
+
+A name that is no lint is an error at its key, which names the closest lint. Only a program's own
+`stone.toml` sets levels; no warning is reported in the packages it uses.
 
 ## Versions
 

@@ -56,6 +56,8 @@ pub struct Manifest {
     /// The oldest stone the package works with.
     pub stone: Option<(Version, Span)>,
     pub dependencies: Vec<Dependency>,
+    /// The level of each lint `[lints]` names, which only a program's own manifest sets.
+    pub lints: crate::lint::Levels,
 }
 
 /// One entry of `[dependencies]`.
@@ -122,17 +124,65 @@ impl Manifest {
                         }
                     }
                 }
-                ("package" | "dependencies", _) => errors.push(Code::Manifest.error(
+                ("lints", Value::Table(table)) => manifest.lints(table, &mut errors),
+                ("package" | "dependencies" | "lints", _) => errors.push(Code::Manifest.error(
                     entry.key_span,
                     format!("'{}' is a table, written as '[{}]'", entry.key, entry.key),
                 )),
                 (key, _) => errors.push(Code::Manifest.error(
                     entry.key_span,
-                    format!("unknown key '{key}'; a manifest holds [package] and [dependencies]"),
+                    format!(
+                        "unknown key '{key}'; a manifest holds [package], [dependencies], and \
+                         [lints]"
+                    ),
                 )),
             }
         }
         (manifest, errors)
+    }
+
+    /// Reads `[lints]`: a level for each lint by its name, or for every other lint by
+    /// `warnings`.
+    fn lints(&mut self, table: &Table, errors: &mut Vec<Diagnostic>) {
+        use crate::explain::{Lint, WARNINGS};
+        use crate::lint::Level;
+        for entry in &table.entries {
+            let lint = match Lint::named(&entry.key) {
+                Some(lint) => Some(lint),
+                None if entry.key == WARNINGS => None,
+                None => {
+                    let names = Lint::ALL.iter().map(|lint| lint.name());
+                    let message = match crate::diagnostic::similar(&entry.key, names) {
+                        Some(like) => {
+                            format!("no lint is named '{}'; did you mean '{like}'?", entry.key)
+                        }
+                        None => format!(
+                            "no lint is named '{}'; `stone explain` with a lint's id gives its \
+                             name",
+                            entry.key
+                        ),
+                    };
+                    errors.push(Code::Manifest.error(entry.key_span, message));
+                    continue;
+                }
+            };
+            let Some(text) = string(entry, errors) else {
+                continue;
+            };
+            let Some(level) = Level::parse(&text) else {
+                errors.push(Code::Manifest.error(
+                    entry.item.span,
+                    format!("a lint's level is \"allow\", \"warn\", or \"deny\", not \"{text}\""),
+                ));
+                continue;
+            };
+            match lint {
+                Some(lint) => {
+                    self.lints.lints.insert(lint, (level, entry.key_span));
+                }
+                None => self.lints.warnings = Some((level, entry.key_span)),
+            }
+        }
     }
 
     fn package(&mut self, table: &Table, errors: &mut Vec<Diagnostic>) {
@@ -457,6 +507,47 @@ mod tests {
     }
 
     #[test]
+    fn a_manifest_sets_the_level_of_each_lint() {
+        use crate::explain::Lint;
+        use crate::lint::Level;
+        let manifest =
+            read("[lints]\nwarnings = \"deny\"\nunused_name = \"allow\"\nlost_change = \"warn\"\n");
+        let levels = &manifest.lints;
+        assert_eq!(levels.level(Lint::UnusedName), Level::Allow);
+        assert_eq!(levels.level(Lint::LostChange), Level::Warn);
+        assert_eq!(levels.level(Lint::UnusedImport), Level::Deny);
+        assert_eq!(read("").lints.level(Lint::UnusedImport), Level::Warn);
+    }
+
+    #[test]
+    fn a_lint_level_must_name_a_lint_and_a_level() {
+        assert_eq!(
+            errors("[lints]\nunused_nme = \"allow\"\n"),
+            [(
+                "no lint is named 'unused_nme'; did you mean 'unused_name'?".to_string(),
+                2,
+                1
+            )]
+        );
+        assert_eq!(
+            errors("[lints]\nlost_change = \"forbid\"\n"),
+            [(
+                "a lint's level is \"allow\", \"warn\", or \"deny\", not \"forbid\"".to_string(),
+                2,
+                15
+            )]
+        );
+        assert_eq!(
+            message("[lints]\nlost_change = 1\n"),
+            "'lost_change' is a string, not an integer"
+        );
+        assert_eq!(
+            message("lints = 1\n"),
+            "'lints' is a table, written as '[lints]'"
+        );
+    }
+
+    #[test]
     fn a_manifest_names_its_package_and_dependencies() {
         let manifest = read(
             "[package]\nname = \"app\"\nversion = \"0.1\"\n\n[dependencies]\n\
@@ -515,7 +606,8 @@ mod tests {
         assert_eq!(
             errors("[dependecies]\n"),
             [(
-                "unknown key 'dependecies'; a manifest holds [package] and [dependencies]"
+                "unknown key 'dependecies'; a manifest holds [package], [dependencies], and \
+                 [lints]"
                     .to_string(),
                 1,
                 2

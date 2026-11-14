@@ -31,7 +31,7 @@ use crate::ast::{
 };
 use crate::constant::{self, ConstValue, Failure};
 use crate::diagnostic::{Diagnostic, Severity, similar};
-use crate::explain::Code;
+use crate::explain::{Code, Lint};
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::spec::{FormatSpec, Presentation};
 use crate::stdlib::{
@@ -2587,7 +2587,7 @@ impl Inference {
                         false => op.literal_right,
                     };
                     if literal && self.shallow(number) == Ty::Int {
-                        self.diagnostics.push(Diagnostic::warning(
+                        self.diagnostics.push(Lint::ListRepetition.warning(
                             op.span,
                             "'*' multiplies each element of a list, so this is a list of one \
                              element, not copies of it as in Python; build a longer list with \
@@ -5963,7 +5963,7 @@ impl Inference {
                          are copies; return it and assign the result where '{name}' is called"
                     ),
                 };
-                let mut diagnostic = Diagnostic::warning(span, message);
+                let mut diagnostic = Lint::LostChange.warning(span, message);
                 if let Some(at) = labelable(arg.span) {
                     let label = format!("'{param}' is a copy of the value it is called with");
                     diagnostic = diagnostic.with_label(at, label);
@@ -11676,7 +11676,7 @@ impl Inference {
             };
             let Space::Or(alternatives) = space else {
                 if !self.useful(&rows, std::slice::from_ref(&space), types) {
-                    self.diagnostics.push(Diagnostic::warning(
+                    self.diagnostics.push(Lint::UnreachableCase.warning(
                         pattern.span,
                         "this case never runs, since the cases before it match every value it \
                          would",
@@ -11698,14 +11698,14 @@ impl Inference {
                 rows.push(vec![alternative]);
             }
             if useless.len() == rows.len() - start {
-                self.diagnostics.push(Diagnostic::warning(
+                self.diagnostics.push(Lint::UnreachableCase.warning(
                     pattern.span,
                     "this case never runs, since the cases before it match every value it would",
                 ));
                 continue;
             }
             for span in useless {
-                self.diagnostics.push(Diagnostic::warning(
+                self.diagnostics.push(Lint::UnreachableCase.warning(
                     span,
                     "this alternative never matches, since the patterns before it match every \
                      value it would",

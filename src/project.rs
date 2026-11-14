@@ -347,6 +347,8 @@ pub struct Linked {
     pub packages: Vec<PackageInfo>,
     /// The test blocks of the entry file, in order, which `stone test` runs.
     pub tests: Vec<Test>,
+    /// The level of each lint, from the `[lints]` table of the program's `stone.toml`.
+    pub lints: crate::lint::Levels,
 }
 
 /// A test block of a file, such as `test "adds one":`, which linking makes a function of
@@ -475,6 +477,7 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
         failed: HashMap::new(),
         unavailable: vec![],
         lock: None,
+        lints: Default::default(),
         tests: vec![],
         diagnostics: vec![],
     };
@@ -594,6 +597,8 @@ struct Loader<'a> {
     unavailable: Vec<Diagnostic>,
     /// The lockfile to write, if it should change.
     lock: Option<(PathBuf, String)>,
+    /// The level of each lint, from the program's own manifest.
+    lints: crate::lint::Levels,
     /// The entry file's tests.
     tests: Vec<Test>,
     diagnostics: Vec<Diagnostic>,
@@ -675,6 +680,7 @@ impl Loader<'_> {
         let file = self.add_manifest(path, source.clone(), None);
         let (manifest, errors) = Manifest::parse(&source, file);
         self.diagnostics.extend(errors);
+        self.lints = manifest.lints.clone();
         if let Some((name, _)) = &manifest.name {
             self.packages[0].name = name.clone();
         }
@@ -1606,6 +1612,7 @@ impl Loader<'_> {
             unavailable: self.unavailable,
             file_packages: self.file_package,
             lock: self.lock,
+            lints: self.lints,
             packages,
             tests: self.tests,
         }

@@ -161,31 +161,173 @@ impl Code {
     }
 }
 
+/// A kind of warning, such as [`Lint::LostChange`] for a change to a parameter that its caller
+/// never sees.
+///
+/// Each has an id, `W` and four digits numbered in the order of [`Lint::ALL`] and never reused,
+/// and a name in snake_case, such as `lost_change`, which a `[lints]` table in `stone.toml`
+/// writes to allow, warn about, or deny it ([`crate::lint`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Lint {
+    UnusedName,
+    UnusedImport,
+    ListRepetition,
+    LostChange,
+    UnreachableCase,
+    UnreachableCode,
+    IgnoredResult,
+    UselessExpression,
+    IdentityConversion,
+    BoolComparison,
+    SelfComparison,
+    SelfAssignment,
+    DuplicateKey,
+    RepeatedCondition,
+    AlwaysFails,
+}
+
+/// The name a `[lints]` table gives every lint at once, as `warnings = "deny"`, and that
+/// `stone check --deny warnings` names.
+pub const WARNINGS: &str = "warnings";
+
+/// What `stone explain` says about a [`Lint`], as an [`Explanation`] says about a [`Code`]:
+/// a program that gets the warning beside one that does not.
+#[derive(Debug)]
+pub struct LintExplanation {
+    pub lint: Lint,
+    /// The id as written, `W` and four digits, such as `W0004`.
+    pub id: &'static str,
+    /// The name a `[lints]` table writes, such as `lost_change`.
+    pub name: &'static str,
+    /// A short description of what the lint finds, such as `a change that is lost`.
+    pub title: &'static str,
+    /// The explanation, in Markdown paragraphs separated by blank lines.
+    pub text: &'static str,
+    /// A program that gets this warning.
+    pub failing: &'static [(&'static str, &'static str)],
+    /// The same program, fixed, which gets no warning.
+    pub fixed: &'static [(&'static str, &'static str)],
+}
+
+impl Lint {
+    /// Every lint, in the order of their ids.
+    pub const ALL: &'static [Lint] = &[
+        Lint::UnusedName,
+        Lint::UnusedImport,
+        Lint::ListRepetition,
+        Lint::LostChange,
+        Lint::UnreachableCase,
+        Lint::UnreachableCode,
+        Lint::IgnoredResult,
+        Lint::UselessExpression,
+        Lint::IdentityConversion,
+        Lint::BoolComparison,
+        Lint::SelfComparison,
+        Lint::SelfAssignment,
+        Lint::DuplicateKey,
+        Lint::RepeatedCondition,
+        Lint::AlwaysFails,
+    ];
+
+    /// Returns the id as written, such as `W0004` for [`Lint::LostChange`].
+    pub fn id(self) -> &'static str {
+        self.explanation().id
+    }
+
+    /// Returns the name a `[lints]` table writes, such as `lost_change`.
+    pub fn name(self) -> &'static str {
+        self.explanation().name
+    }
+
+    /// Returns what `stone explain` says about the lint.
+    pub fn explanation(self) -> &'static LintExplanation {
+        &LINT_EXPLANATIONS[self as usize]
+    }
+
+    /// Returns the lint named `name` in snake_case, such as `lost_change`, if there is one.
+    pub fn named(name: &str) -> Option<Lint> {
+        Lint::ALL.iter().copied().find(|lint| lint.name() == name)
+    }
+
+    /// Returns the lint whose id is `id`, such as `W0004`, if there is one.
+    pub fn with_id(id: &str) -> Option<Lint> {
+        Lint::ALL.iter().copied().find(|lint| lint.id() == id)
+    }
+
+    /// Makes a warning of this kind, as `Diagnostic::warning` does with the lint's id as its
+    /// code.
+    ///
+    /// For example, `Lint::UnusedName.warning(span, "variable 'x' is never used")` renders as
+    /// `warning[W0001]: variable 'x' is never used`.
+    pub fn warning(self, span: Span, message: impl Into<String>) -> Diagnostic {
+        Diagnostic::warning(span, message).with_code(self.id())
+    }
+}
+
+/// What `stone explain` can explain: an error's code or a lint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Topic {
+    Error(Code),
+    Lint(Lint),
+}
+
 /// Where the published documentation lists every code, each at an anchor of its own.
 pub const ERRORS_PAGE: &str = "https://tarolling.github.io/stone/reference/errors.html";
 
-/// Returns the address of the documentation of the code `id`, for editors to link.
+/// Where the published documentation lists every lint, each at an anchor of its own.
+pub const LINTS_PAGE: &str = "https://tarolling.github.io/stone/reference/lints.html";
+
+/// Returns the address of the documentation of the code `id`, an error's or a lint's, for
+/// editors to link.
 ///
 /// For example, `docs_url("E0005")` gives
-/// `https://tarolling.github.io/stone/reference/errors.html#e0005`.
+/// `https://tarolling.github.io/stone/reference/errors.html#e0005`, and `docs_url("W0001")` an
+/// anchor of the lints page.
 pub fn docs_url(id: &str) -> String {
-    format!("{ERRORS_PAGE}#{}", id.to_ascii_lowercase())
+    let page = match id.starts_with('W') {
+        true => LINTS_PAGE,
+        false => ERRORS_PAGE,
+    };
+    format!("{page}#{}", id.to_ascii_lowercase())
 }
 
-/// Returns what `stone explain` prints for `code`: its id and title, the explanation, then the
+/// Returns what `stone explain` prints for `topic`: its id and title, the explanation, then the
 /// failing example and the fixed one, each file indented under its name when there are several.
-pub fn text(code: Code) -> String {
-    let explanation = code.explanation();
-    let mut out = format!(
-        "{}: {}\n\n{}\n",
-        explanation.id, explanation.title, explanation.text
-    );
+pub fn text(topic: Topic) -> String {
+    match topic {
+        Topic::Error(code) => {
+            let explanation = code.explanation();
+            let mut out = format!(
+                "{}: {}\n\n{}\n",
+                explanation.id, explanation.title, explanation.text
+            );
+            let failing = format!("For example, this program fails with {}:", explanation.id);
+            write_examples(&mut out, failing, explanation.failing, explanation.fixed);
+            out
+        }
+        Topic::Lint(lint) => {
+            let explanation = lint.explanation();
+            let mut out = format!(
+                "{} ({}): {}\n\n{}\n",
+                explanation.id, explanation.name, explanation.title, explanation.text
+            );
+            let failing = format!("For example, this program warns with {}:", explanation.id);
+            write_examples(&mut out, failing, explanation.failing, explanation.fixed);
+            out
+        }
+    }
+}
+
+/// Writes a failing example under `failing` and the fixed one, as [`text`] shows them.
+fn write_examples(
+    out: &mut String,
+    failing: String,
+    failing_files: &[(&str, &str)],
+    fixed_files: &[(&str, &str)],
+) {
     let examples = [
-        (
-            format!("For example, this program fails with {}:", explanation.id),
-            explanation.failing,
-        ),
-        ("This one is fixed:".to_string(), explanation.fixed),
+        (failing, failing_files),
+        ("This one is fixed:".to_string(), fixed_files),
     ];
     for (heading, files) in examples {
         out.push_str(&format!("\n{heading}\n"));
@@ -202,7 +344,33 @@ pub fn text(code: Code) -> String {
             }
         }
     }
-    out
+}
+
+/// Writes a failing example under `failing` and the fixed one as Markdown, each file in a
+/// fenced block, as the errors and lints pages show them.
+fn write_markdown_examples(
+    out: &mut String,
+    failing: String,
+    failing_files: &[(&str, &str)],
+    fixed_files: &[(&str, &str)],
+) {
+    let examples = [
+        (failing, failing_files),
+        ("This one is fixed:".to_string(), fixed_files),
+    ];
+    for (heading, files) in examples {
+        out.push_str(&format!("\n{heading}\n"));
+        for (path, source) in files {
+            let language = match path.ends_with(".stn") {
+                true => "stone",
+                false => "toml",
+            };
+            if files.len() > 1 {
+                out.push_str(&format!("\n`{path}`:\n"));
+            }
+            out.push_str(&format!("\n```{language}\n{source}```\n"));
+        }
+    }
 }
 
 /// Returns `docs/reference/errors.md`, which lists every code with its explanation and
@@ -213,8 +381,9 @@ pub fn markdown() -> String {
          Every error the checker, the linker, or the parser reports has a code, which an error \
          shows after its severity, as in `main.stn:2:5: error[E0005]: cannot assign str to 'x', \
          which is int`. `stone explain E0005` prints what a code means, with an example of the \
-         error and its fix, and editors link each error to its code below. Warnings and \
-         [runtime errors](runtime-errors.md) have no code.\n",
+         error and its fix, and editors link each error to its code below. Warnings have codes \
+         of their own, listed under [lints](lints.md), and [runtime errors](runtime-errors.md) \
+         have none.\n",
     );
     for code in Code::ALL {
         let explanation = code.explanation();
@@ -225,26 +394,8 @@ pub fn markdown() -> String {
             explanation.title,
             explanation.text
         ));
-        let examples = [
-            (
-                format!("This program fails with {id}:"),
-                explanation.failing,
-            ),
-            ("This one is fixed:".to_string(), explanation.fixed),
-        ];
-        for (heading, files) in examples {
-            out.push_str(&format!("\n{heading}\n"));
-            for (path, source) in files {
-                let language = match path.ends_with(".stn") {
-                    true => "stone",
-                    false => "toml",
-                };
-                if files.len() > 1 {
-                    out.push_str(&format!("\n`{path}`:\n"));
-                }
-                out.push_str(&format!("\n```{language}\n{source}```\n"));
-            }
-        }
+        let failing = format!("This program fails with {id}:");
+        write_markdown_examples(&mut out, failing, explanation.failing, explanation.fixed);
         if let Some(target) = explanation.target {
             out.push_str(&format!(
                 "\nOnly a build for `{target}` reports this error.\n"
@@ -254,12 +405,72 @@ pub fn markdown() -> String {
     out
 }
 
+/// Returns `docs/reference/lints.md`, which lists every lint with its name, explanation, and
+/// examples, under an anchor such as `#w0004` that editors link to.
+pub fn lints_markdown() -> String {
+    let mut out = String::from(LINTS_INTRO);
+    for lint in Lint::ALL {
+        let explanation = lint.explanation();
+        let id = explanation.id;
+        out.push_str(&format!(
+            "\n({})=\n## {id}: {}\n\nName: `{}`\n\n{}\n",
+            id.to_ascii_lowercase(),
+            explanation.title,
+            explanation.name,
+            explanation.text
+        ));
+        let failing = format!("This program warns with {id}:");
+        write_markdown_examples(&mut out, failing, explanation.failing, explanation.fixed);
+    }
+    out
+}
+
+/// What the lints page says before the lints.
+const LINTS_INTRO: &str = r#"# Lints
+
+A warning points out code that is valid but probably not what was meant, such as a change that
+is lost or a statement that never runs. The program still runs, and `stone check` still passes.
+Each kind of warning is a lint, with an id that a warning shows after its severity, as in
+`main.stn:2:5: warning[W0004]: changes to 'xs' are lost when 'push' returns`, and a name, such as
+`lost_change`. `stone explain W0004` (or `stone explain lost_change`) prints what a lint finds,
+with an example and its fix, and editors link each warning to its lint below.
+
+`stone run`, `stone build`, and `stone test` print warnings before they go on, except
+[W0001](#w0001) and [W0002](#w0002), unused names and imports, which only `stone check` and
+editors report, so a program under construction runs quietly. No warning is reported in stone's
+own modules or in the packages a program uses.
+
+## Levels
+
+A program's `stone.toml` sets how each lint is reported in a `[lints]` table, by name:
+
+```toml
+[lints]
+unused_name = "allow"
+lost_change = "deny"
+```
+
+`"allow"` reports nothing, `"warn"`, the default, reports a warning, and `"deny"` reports an
+error, which keeps the program from running or building and still shows the lint's id, as in
+`error[W0004]`. The name `warnings` sets every lint the table does not name, so
+`warnings = "deny"` with `unused_name = "warn"` denies every lint but that one. A name that is
+no lint is an error at its key.
+
+`stone check --deny warnings` reports every warning that is left as an error, so that CI fails on
+any of them.
+"#;
+
 /// Returns the line `stone check`, `run`, and `build` print after errors that have codes,
-/// pointing to `stone explain`, or `None` if none has a code.
+/// pointing to `stone explain`, or `None` if none has a code. Warnings are left out, since a
+/// warning's code is not an error's; a denied lint is an error.
 ///
 /// For example, after one `E0005` it is ``For more about this error, try `stone explain E0005`.``
 pub fn hint(diagnostics: &[Diagnostic]) -> Option<String> {
-    let mut codes: Vec<&str> = diagnostics.iter().filter_map(Diagnostic::code).collect();
+    let mut codes: Vec<&str> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::diagnostic::Severity::Error)
+        .filter_map(Diagnostic::code)
+        .collect();
     let first = *codes.first()?;
     codes.sort_unstable();
     codes.dedup();
@@ -272,18 +483,27 @@ pub fn hint(diagnostics: &[Diagnostic]) -> Option<String> {
     })
 }
 
-/// Returns the code written as `text`, such as `E0006`, `e0006`, or `6`, if there is one.
-pub fn find(text: &str) -> Option<Code> {
-    let digits = text.trim();
-    let digits = digits
-        .strip_prefix('E')
-        .or_else(|| digits.strip_prefix('e'))
-        .unwrap_or(digits);
-    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
+/// Returns what `text` names, if anything: an error's code, such as `E0006`, `e0006`, or `6`,
+/// or a lint's id, such as `W0004` or `w4`, or its name, such as `lost_change`.
+pub fn find(text: &str) -> Option<Topic> {
+    let text = text.trim();
+    if let Some(lint) = Lint::named(text) {
+        return Some(Topic::Lint(lint));
     }
-    let number: usize = digits.parse().ok()?;
-    Code::ALL.get(number.checked_sub(1)?).copied()
+    let number = |digits: &str| -> Option<usize> {
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        digits.parse::<usize>().ok()?.checked_sub(1)
+    };
+    if let Some(digits) = text.strip_prefix('W').or_else(|| text.strip_prefix('w')) {
+        return Lint::ALL.get(number(digits)?).copied().map(Topic::Lint);
+    }
+    let digits = text
+        .strip_prefix('E')
+        .or_else(|| text.strip_prefix('e'))
+        .unwrap_or(text);
+    Code::ALL.get(number(digits)?).copied().map(Topic::Error)
 }
 
 const EXPLANATIONS: &[Explanation] = &[
@@ -1765,6 +1985,423 @@ print(buffer)
     },
 ];
 
+const LINT_EXPLANATIONS: &[LintExplanation] = &[
+    LintExplanation {
+        lint: Lint::UnusedName,
+        id: "W0001",
+        name: "unused_name",
+        title: r#"a name that is never used"#,
+        text: r#"A variable, parameter, function, method, struct, enum, trait, or constant is defined, but
+nothing uses it, which often means a typo or code left behind by a change. Remove it, or, for a
+variable or parameter meant to go unused, start its name with `_`, as in `_h`, which is never
+reported. A `pub` definition is never reported either, since other modules may use it, and
+neither are the parameters of a trait's methods, which each type's own method may need.
+
+Only `stone check` and editors report this, so a program under construction runs quietly."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn area(w: int, h: int) -> int:
+    ret w * w
+
+print(area(3, 4))
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"fn area(w: int, h: int) -> int:
+    ret w * h
+
+print(area(3, 4))
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::UnusedImport,
+        id: "W0002",
+        name: "unused_import",
+        title: r#"an import that is never used"#,
+        text: r#"A `use` binds a module, or a function, type, or constant of one, that nothing in the file
+uses. Remove the `use`, or start the name it binds with `_` (`use math as _math`).
+
+Only `stone check` and editors report this, so a program under construction runs quietly."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"use math
+
+print(1 + 2)
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"print(1 + 2)
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::ListRepetition,
+        id: "W0003",
+        name: "list_repetition",
+        title: r#"a list literal multiplied by an int"#,
+        text: r#"`*` between a list and a number multiplies each element of the list, so `[0] * 3` is `[0]`, a
+list of one element, and not three copies of it as in Python. To build a longer list, append to it
+in a loop."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"zeros = [0] * 3
+print(zeros)
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"zeros = []
+for _ in range(3):
+    zeros.append(0)
+print(zeros)
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::LostChange,
+        id: "W0004",
+        name: "lost_change",
+        title: r#"a change to a parameter that is lost"#,
+        text: r#"A function changes a parameter, such as by appending to a list, but never reads it again or
+returns it. Parameters are copies of the values a function is called with, so the change is lost
+when the function returns, and the caller's value stays as it was. Return the changed value and
+assign it where the function is called, as in `xs = push(xs)`, which changes the list in place
+without copying it."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn push(xs: list[int]):
+    xs.append(1)
+
+nums = [0]
+push(nums)
+print(nums)
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"fn push(xs: list[int]) -> list[int]:
+    xs.append(1)
+    ret xs
+
+nums = [0]
+nums = push(nums)
+print(nums)
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::UnreachableCase,
+        id: "W0005",
+        name: "unreachable_case",
+        title: r#"a case that never runs"#,
+        text: r#"The cases before a case of a `match` already match every value its pattern would, so it never
+runs, or an alternative of a `|` pattern never matches for the same reason. A `match` tries its
+cases in order, so put the more particular case first, or remove the one that never runs."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"x = 3
+match x:
+    case _:
+        print("any")
+    case 3:
+        print("three")
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"x = 3
+match x:
+    case 3:
+        print("three")
+    case _:
+        print("any")
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::UnreachableCode,
+        id: "W0006",
+        name: "unreachable_code",
+        title: r#"code that never runs"#,
+        text: r#"A statement comes after one that always leaves the block it is in: a `ret`, `break`, or `cont`,
+an `if` or `match` each of whose branches leaves, or a `while true:` loop with no `break`. Nothing
+after it in the block ever runs. Move the code before the statement that leaves, or remove it.
+Only the first statement that never runs is reported, and definitions, such as a `fn` after a
+loop that never ends, are not, since a definition takes effect wherever it is written."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn first_even(xs: list[int]) -> int:
+    for x in xs:
+        if x % 2 == 0:
+            ret x
+            print("found it")
+    ret -1
+
+print(first_even([3, 4]))
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"fn first_even(xs: list[int]) -> int:
+    for x in xs:
+        if x % 2 == 0:
+            print("found it")
+            ret x
+    ret -1
+
+print(first_even([3, 4]))
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::IgnoredResult,
+        id: "W0007",
+        name: "ignored_result",
+        title: r#"a result that is never used"#,
+        text: r#"A call that gives a `result` is a statement of its own, so if it fails, its `err` is dropped
+and the program goes on as if it had worked, as when a file cannot be written. Add `?` to return
+the error from the function, use `.unwrap()` to stop the program with it, or `match` on the
+result to handle it. To ignore it on purpose, assign it to a name that starts with `_`, which is
+never reported as unused."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"use fs
+
+fs.write("notes.txt", "hello")
+print("saved")
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"use fs
+
+fs.write("notes.txt", "hello").unwrap()
+print("saved")
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::UselessExpression,
+        id: "W0008",
+        name: "useless_expression",
+        title: r#"an expression whose value is never used"#,
+        text: r#"A statement is an expression that calls nothing, such as `x + 1` or `count == 1`, so it
+computes a value and then drops it. Often `==` was written for `=`, which assigns; otherwise use
+the value or remove the statement. A string alone on a line is not a comment in stone: comments
+start with `//`."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"count = 0
+count == 1
+print(count)
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"count = 0
+count = 1
+print(count)
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::IdentityConversion,
+        id: "W0009",
+        name: "identity_conversion",
+        title: r#"a conversion to the type a value already has"#,
+        text: r#"A conversion such as `int(n)` or `str(s)` is given a value of the type it converts to, so it
+gives the value back unchanged. Use the value itself."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn shout(s: str) -> str:
+    ret str(s).upper()
+
+print(shout("hi"))
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"fn shout(s: str) -> str:
+    ret s.upper()
+
+print(shout("hi"))
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::BoolComparison,
+        id: "W0010",
+        name: "bool_comparison",
+        title: r#"a bool compared with true or false"#,
+        text: r#"`done == true` is `done`, and `done == false` is `not done`, so the comparison says nothing the
+bool does not. Write the bool, or `not` and the bool."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"done = false
+if done == false:
+    print("working")
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"done = false
+if not done:
+    print("working")
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::SelfComparison,
+        id: "W0011",
+        name: "self_comparison",
+        title: r#"a value compared with itself"#,
+        text: r#"Both sides of a comparison are the same int, bool, str, or bytes, written alike, so its answer is
+always the same: `x == x` is always true and `x < x` always false. One side is usually a typo for
+another value. Floats are not reported, since `x != x` is true for a nan."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn is_sorted(xs: list[int]) -> bool:
+    for i in range(1, xs.len()):
+        if xs[i] < xs[i]:
+            ret false
+    ret true
+
+print(is_sorted([1, 2, 3]))
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"fn is_sorted(xs: list[int]) -> bool:
+    for i in range(1, xs.len()):
+        if xs[i] < xs[i - 1]:
+            ret false
+    ret true
+
+print(is_sorted([1, 2, 3]))
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::SelfAssignment,
+        id: "W0012",
+        name: "self_assignment",
+        title: r#"a variable or place assigned to itself"#,
+        text: r#"An assignment such as `x = x` or `p.x = p.x` gives a place the value it already holds, so it
+changes nothing, and the value meant was usually another. `self = self` in a method is not
+reported, since it is how a method says it changes `self`, as a trait's default method may."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn larger(a: int, b: int) -> int:
+    best = a
+    if b > a:
+        best = best
+    ret best
+
+print(larger(1, 2))
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"fn larger(a: int, b: int) -> int:
+    best = a
+    if b > a:
+        best = b
+    ret best
+
+print(larger(1, 2))
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::DuplicateKey,
+        id: "W0013",
+        name: "duplicate_key",
+        title: r#"a key given twice in a literal"#,
+        text: r#"A map literal gives the same key twice, so the value given later replaces the one given first,
+which is lost; or a set literal gives the same element twice. Keys are compared as constants,
+so `{k: 1, "a": 2}` with `const k = "a"` is reported too."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"ages = {"ann": 31, "bob": 27, "ann": 32}
+print(ages)
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"ages = {"ann": 31, "bob": 27, "cy": 32}
+print(ages)
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::RepeatedCondition,
+        id: "W0014",
+        name: "repeated_condition",
+        title: r#"a condition tested twice in one chain"#,
+        text: r#"An `elif` tests a condition written exactly like one an `if` or `elif` before it in the same
+chain tested. If it were true, the earlier branch would have run instead, so this branch never
+runs. A condition that calls a function is not reported, since a call may answer differently each
+time."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn grade(score: int) -> str:
+    if score >= 90:
+        ret "A"
+    elif score >= 80:
+        ret "B"
+    elif score >= 80:
+        ret "C"
+    ret "F"
+
+print(grade(85))
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"fn grade(score: int) -> str:
+    if score >= 90:
+        ret "A"
+    elif score >= 80:
+        ret "B"
+    elif score >= 70:
+        ret "C"
+    ret "F"
+
+print(grade(85))
+"#,
+        )],
+    },
+    LintExplanation {
+        lint: Lint::AlwaysFails,
+        id: "W0015",
+        name: "always_fails",
+        title: r#"an operation that fails whenever it runs"#,
+        text: r#"An int or float is divided by zero, or its remainder taken by zero, or an int is shifted by a
+count outside 0 to 63, and the right side is a constant, so the operation fails with a runtime
+error every time it runs. It is a warning rather than an error since the code may never run. An
+operation of literals alone, as `1 / 0`, is not reported, since it is written so on purpose."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn half(total: int) -> int:
+    ret total / 0
+
+print(half(10))
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"fn half(total: int) -> int:
+    ret total / 2
+
+print(half(10))
+"#,
+        )],
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1782,9 +2419,10 @@ mod tests {
 
     #[test]
     fn a_code_is_found_however_it_is_written() {
-        assert_eq!(find("E0005"), Some(Code::Mismatch));
-        assert_eq!(find("e0005"), Some(Code::Mismatch));
-        assert_eq!(find("5"), Some(Code::Mismatch));
+        let mismatch = Some(Topic::Error(Code::Mismatch));
+        assert_eq!(find("E0005"), mismatch);
+        assert_eq!(find("e0005"), mismatch);
+        assert_eq!(find("5"), mismatch);
         assert_eq!(find("E0000"), None);
         assert_eq!(find("E9999"), None);
         assert_eq!(find("E"), None);
@@ -1830,6 +2468,111 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn lints_are_numbered_in_order() {
+        assert_eq!(LINT_EXPLANATIONS.len(), Lint::ALL.len());
+        let mut names = std::collections::HashSet::new();
+        for (i, lint) in Lint::ALL.iter().enumerate() {
+            assert_eq!(*lint as usize, i, "{lint:?} is out of order");
+            let explanation = lint.explanation();
+            assert_eq!(explanation.lint, *lint);
+            assert_eq!(explanation.id, format!("W{:04}", i + 1));
+            assert!(
+                explanation
+                    .name
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b == b'_'),
+                "{} is not snake_case",
+                explanation.name
+            );
+            assert!(
+                names.insert(explanation.name),
+                "{} is used twice",
+                explanation.name
+            );
+            assert_eq!(Lint::named(explanation.name), Some(*lint));
+        }
+        assert_eq!(Lint::named(WARNINGS), None);
+    }
+
+    #[test]
+    fn a_lint_is_found_by_its_id_or_its_name() {
+        assert_eq!(find("W0004"), Some(Topic::Lint(Lint::LostChange)));
+        assert_eq!(find("w4"), Some(Topic::Lint(Lint::LostChange)));
+        assert_eq!(find("lost_change"), Some(Topic::Lint(Lint::LostChange)));
+        assert_eq!(find("4"), Some(Topic::Error(Code::NoMember)));
+        assert_eq!(find("W0000"), None);
+        assert_eq!(find("W9999"), None);
+        assert_eq!(find("lost"), None);
+    }
+
+    #[test]
+    fn a_lint_links_to_the_lints_page() {
+        assert_eq!(
+            docs_url("W0002"),
+            "https://tarolling.github.io/stone/reference/lints.html#w0002"
+        );
+        assert_eq!(
+            docs_url("E0002"),
+            "https://tarolling.github.io/stone/reference/errors.html#e0002"
+        );
+    }
+
+    #[test]
+    fn every_warning_is_made_with_a_lint() {
+        const UNCODED: &[&str] = &["diagnostic.rs", "explain.rs"];
+        let mut files = vec![];
+        rust_files(
+            &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+            &mut files,
+        );
+        for path in files {
+            let name = path.file_name().unwrap().to_string_lossy();
+            if UNCODED.contains(&name.as_ref()) || name == "tests.rs" {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).unwrap();
+            let code = source.split("#[cfg(test)]").next().unwrap_or_default();
+            for (i, line) in code.lines().enumerate() {
+                let line_code = line.split("//").next().unwrap_or_default();
+                assert!(
+                    !line_code.contains("Diagnostic::warning("),
+                    "{}:{}: make this warning with a lint, as in \
+                     `Lint::LostChange.warning(span, message)`",
+                    path.display(),
+                    i + 1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_warning_renders_its_lint() {
+        let span = Span::new(crate::span::Pos::new(1, 1), crate::span::Pos::new(1, 2));
+        let rendered = Lint::UnusedName
+            .warning(span, "variable 'x' is never used")
+            .render("main.stn", "x\n");
+        assert!(
+            rendered.starts_with("main.stn:1:1: warning[W0001]: variable 'x' is never used\n"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn the_hint_names_only_the_codes_of_errors() {
+        let span = Span::new(crate::span::Pos::new(1, 1), crate::span::Pos::new(1, 2));
+        let warning = Lint::UnusedName.warning(span, "unused");
+        assert_eq!(hint(std::slice::from_ref(&warning)), None);
+        let denied = Diagnostic {
+            severity: crate::diagnostic::Severity::Error,
+            ..warning
+        };
+        assert_eq!(
+            hint(&[denied]).as_deref(),
+            Some("For more about this error, try `stone explain W0001`.\n")
+        );
     }
 
     #[test]

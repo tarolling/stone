@@ -134,8 +134,11 @@ impl Document {
         store: Option<PathBuf>,
         encoding: Encoding,
     ) -> Self {
-        let analysis = stone::driver::analyze_linked(&linked);
+        let mut analysis = stone::driver::analyze_linked(&linked);
+        let found = std::mem::take(&mut analysis.diagnostics);
+        analysis.diagnostics = stone::lint::apply(found, &linked.lints, &linked.sources);
         let unused = stone::unused::find(&linked, &analysis);
+        let unused = stone::lint::apply(unused, &linked.lints, &linked.sources);
         let text = linked.sources.file(file).source.clone();
         let index = LineIndex::new(&text, encoding);
         let (tokens, _) = Lexer::with_file(&text, file).lex_recovering();

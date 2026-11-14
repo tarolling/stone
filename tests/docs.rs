@@ -205,3 +205,41 @@ fn every_error_code_has_examples_that_behave() {
         );
     }
 }
+
+#[test]
+fn lints_page_is_current() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/reference/lints.md");
+    let want = stone::explain::lints_markdown();
+    if std::env::var_os("STONE_UPDATE_DOCS").is_some() {
+        std::fs::write(&path, &want).unwrap();
+    }
+    let page = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        page == want,
+        "docs/reference/lints.md is out of date with src/explain.rs; rewrite it with \
+         `STONE_UPDATE_DOCS=1 cargo test --test docs lints_page_is_current`"
+    );
+}
+
+#[test]
+fn every_lint_has_examples_that_behave() {
+    let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("lints");
+    for lint in stone::explain::Lint::ALL {
+        let explanation = lint.explanation();
+        let id = explanation.id;
+        assert!(!explanation.text.is_empty(), "{id} has no explanation");
+        let main = write_example(&scratch.join(id).join("failing"), explanation.failing);
+        let (passed, stderr) = check_example(&main, None);
+        let first = stderr.lines().find(|line| line.contains(": warning"));
+        assert!(
+            passed && first.is_some_and(|line| line.contains(&format!("warning[{id}]: "))),
+            "{id}'s failing example should warn with {id} first, but stone wrote:\n{stderr}"
+        );
+        let main = write_example(&scratch.join(id).join("fixed"), explanation.fixed);
+        let (passed, stderr) = check_example(&main, None);
+        assert!(
+            passed && !stderr.contains("warning"),
+            "{id}'s fixed example should pass with no warning, but stone wrote:\n{stderr}"
+        );
+    }
+}

@@ -100,13 +100,17 @@ pub fn check_linked(
         sources,
         mut diagnostics,
         tests,
+        lints,
         ..
     } = linked;
     diagnostics.extend(lock_error);
     if has_errors(&diagnostics) {
         return (sources, Err(Diagnostics(diagnostics)));
     }
-    let analysis = TypeChecker::new().analyze(&module);
+    let mut analysis = TypeChecker::new().analyze(&module);
+    add_lints(&module, &mut analysis, &sources);
+    let found = std::mem::take(&mut analysis.diagnostics);
+    analysis.diagnostics = crate::lint::apply(found, &lints, &sources);
     if has_errors(&analysis.diagnostics) {
         return (sources, Err(Diagnostics(analysis.diagnostics)));
     }
@@ -149,8 +153,24 @@ pub fn analyze_linked(linked: &Linked) -> Analysis {
     let mut analysis = TypeChecker::new().analyze(&linked.module);
     if !linked.diagnostics.is_empty() {
         analysis.diagnostics = linked.diagnostics.clone();
+    } else {
+        add_lints(&linked.module, &mut analysis, &linked.sources);
     }
     analysis
+}
+
+/// Adds the warnings of the lints [`crate::lint::find`] reports to the checker's `analysis` of
+/// `module`, if it found no errors, keeping its diagnostics sorted by file and position.
+fn add_lints(module: &Mod, analysis: &mut Analysis, sources: &SourceMap) {
+    if has_errors(&analysis.diagnostics) {
+        return;
+    }
+    let found = crate::lint::find(module, analysis, sources);
+    analysis.diagnostics.extend(found);
+    // stable, so the checker's own diagnostics stay first at a position
+    analysis
+        .diagnostics
+        .sort_by_key(|d| (d.span.file, d.span.start));
 }
 
 /// Parses and checks source code, returning everything learned about it for editor tooling,
@@ -194,6 +214,7 @@ pub fn check_program(
     if let Ok(host) = Target::host() {
         diagnostics.extend(unsupported(&linked.module, &linked.sources, host.os));
     }
+    let mut diagnostics = crate::lint::apply(diagnostics, &linked.lints, &linked.sources);
     // stable, so a warning stays before an error at the same place
     diagnostics.sort_by_key(|d| (d.span.file, d.span.start));
     (linked.sources, diagnostics)

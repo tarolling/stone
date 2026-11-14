@@ -67,6 +67,7 @@ reference/manifest
 reference/types
 reference/builtins
 reference/errors
+reference/lints
 reference/runtime-errors
 reference/cli
 reference/editor

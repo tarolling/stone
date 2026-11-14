@@ -1,6 +1,6 @@
 # Error codes
 
-Every error the checker, the linker, or the parser reports has a code, which an error shows after its severity, as in `main.stn:2:5: error[E0005]: cannot assign str to 'x', which is int`. `stone explain E0005` prints what a code means, with an example of the error and its fix, and editors link each error to its code below. Warnings and [runtime errors](runtime-errors.md) have no code.
+Every error the checker, the linker, or the parser reports has a code, which an error shows after its severity, as in `main.stn:2:5: error[E0005]: cannot assign str to 'x', which is int`. `stone explain E0005` prints what a code means, with an example of the error and its fix, and editors link each error to its code below. Warnings have codes of their own, listed under [lints](lints.md), and [runtime errors](runtime-errors.md) have none.
 
 (e0001)=
 ## E0001: the program does not parse

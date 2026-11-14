@@ -35,7 +35,7 @@ root=${STONE_ROOT:-$(cd "$scripts/.." && pwd)}
 # replaces the file with stdin once the command writing it has succeeded
 replace() {
     tmp="$1.tmp.$$"
-    cat > "$tmp"
+    cat >"$tmp"
     mv "$tmp" "$1"
 }
 
@@ -73,9 +73,9 @@ set_npm_version() {
 }
 
 case $target in
-    stone) current=$(cargo_version "$root/Cargo.toml") ;;
-    vscode) current=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' "$root/editors/vscode/package.json") ;;
-    *) usage ;;
+stone) current=$(cargo_version "$root/Cargo.toml") ;;
+vscode) current=$(sed -n 's/^  "version": "\(.*\)",$/\1/p' "$root/editors/vscode/package.json") ;;
+*) usage ;;
 esac
 
 major=${current%%.*}
@@ -83,13 +83,13 @@ rest=${current#*.}
 minor=${rest%%.*}
 patch=${rest#*.}
 case $bump in
-    major) new="$((major + 1)).0.0" ;;
-    minor) new="$major.$((minor + 1)).0" ;;
-    patch) new="$major.$minor.$((patch + 1))" ;;
-    *)
-        echo "$bump" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || usage
-        new=$bump
-        ;;
+major) new="$((major + 1)).0.0" ;;
+minor) new="$major.$((minor + 1)).0" ;;
+patch) new="$major.$minor.$((patch + 1))" ;;
+*)
+    echo "$bump" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || usage
+    new=$bump
+    ;;
 esac
 
 # a new version must sort after the current one
@@ -101,34 +101,37 @@ fi
 
 # first, so a release with no notes changes nothing
 case $target in
-    stone) changelog=CHANGELOG.md released="v$current" ;;
-    vscode) changelog=editors/vscode/CHANGELOG.md released="vscode-v$current" ;;
+stone) changelog=CHANGELOG.md released="v$current" ;;
+vscode) changelog=editors/vscode/CHANGELOG.md released="vscode-v$current" ;;
 esac
-if git -C "$root" rev-parse -q --verify "refs/tags/$released" > /dev/null 2>&1 &&
+if git -C "$root" rev-parse -q --verify "refs/tags/$released" >/dev/null 2>&1 &&
     ! grep -qF "## [$current]" "$root/$changelog"; then
     day=$(git -C "$root" log -1 --format=%cs "$released")
     sh "$scripts/changelog.sh" release "$root/$changelog" "$current" "$day" ||
-        { echo "error: $released is tagged, but $changelog has no notes for it" >&2; exit 1; }
+        {
+            echo "error: $released is tagged, but $changelog has no notes for it" >&2
+            exit 1
+        }
     echo "dated the notes of $current in $changelog as $day"
 fi
 
 case $target in
-    stone)
-        set_cargo_version "$root/Cargo.toml" "$new"
-        for lock in Cargo.lock fuzz/Cargo.lock bench/Cargo.lock; do
-            set_locked_version "$root/$lock" stone "$new"
-        done
-        tag="v$new"
-        files="Cargo.toml Cargo.lock fuzz/Cargo.lock bench/Cargo.lock $changelog"
-        ;;
-    vscode)
-        set_npm_version "$root/editors/vscode/package.json" "$new"
-        set_npm_version "$root/editors/vscode/package-lock.json" "$new"
-        set_cargo_version "$root/lsp/Cargo.toml" "$new"
-        set_locked_version "$root/Cargo.lock" stone-lsp "$new"
-        tag="vscode-v$new"
-        files="editors/vscode/package.json editors/vscode/package-lock.json lsp/Cargo.toml Cargo.lock $changelog"
-        ;;
+stone)
+    set_cargo_version "$root/Cargo.toml" "$new"
+    for lock in Cargo.lock fuzz/Cargo.lock bench/Cargo.lock; do
+        set_locked_version "$root/$lock" stone "$new"
+    done
+    tag="v$new"
+    files="Cargo.toml Cargo.lock fuzz/Cargo.lock bench/Cargo.lock $changelog"
+    ;;
+vscode)
+    set_npm_version "$root/editors/vscode/package.json" "$new"
+    set_npm_version "$root/editors/vscode/package-lock.json" "$new"
+    set_cargo_version "$root/lsp/Cargo.toml" "$new"
+    set_locked_version "$root/Cargo.lock" stone-lsp "$new"
+    tag="vscode-v$new"
+    files="editors/vscode/package.json editors/vscode/package-lock.json lsp/Cargo.toml Cargo.lock $changelog"
+    ;;
 esac
 
 echo "bumped $target from $current to $new"

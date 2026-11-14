@@ -25,7 +25,7 @@ expect() {
 
 # fails unless the command fails
 refuse() {
-    if "$@" > /dev/null 2>&1; then
+    if "$@" >/dev/null 2>&1; then
         echo "FAIL: accepted '$*'" >&2
         exit 1
     fi
@@ -33,7 +33,7 @@ refuse() {
 
 # a changelog with an unreleased change and three releases, the middle one empty
 reset() {
-    cat > "$log" <<'EOF'
+    cat >"$log" <<'EOF'
 # Changelog
 
 All notable changes.
@@ -71,7 +71,8 @@ EOF
 }
 
 # what notes prints for 0.2.0
-release_020=$(cat <<'EOF'
+release_020=$(
+    cat <<'EOF'
 ### Added
 
 - `x % y`
@@ -129,7 +130,7 @@ changelog release "$log" 0.3.0
 expect "$(grep -c "^## \[0.3.0\] - $(date +%Y-%m-%d)$" "$log")" 1
 
 echo "test: release refuses an empty unreleased section and leaves the file alone"
-changelog release "$log" 0.4.0 2026-04-01 2> "$work/stderr" && exit 1
+changelog release "$log" 0.4.0 2026-04-01 2>"$work/stderr" && exit 1
 expect "$(cat "$work/stderr")" "error: nothing to release, since the [Unreleased] section of $log is empty"
 expect "$(grep -c '0.4.0' "$log")" 0
 
@@ -146,18 +147,24 @@ refuse changelog publish "$log" 0.3.0
 expect "$(cat "$log")" "$(cat "$work/before.md")"
 
 echo "test: release refuses a changelog with no unreleased section"
-grep -v '^## \[Unreleased\]$' "$work/before.md" > "$log"
+grep -v '^## \[Unreleased\]$' "$work/before.md" >"$log"
 refuse changelog release "$log" 0.3.0
 
 # every heading in a real changelog is Unreleased or a dated version with notes
 check_headings() {
     file="$root/$1"
-    grep -q '^## \[Unreleased\]$' "$file" || { echo "FAIL: $1 has no [Unreleased] section" >&2; exit 1; }
+    grep -q '^## \[Unreleased\]$' "$file" || {
+        echo "FAIL: $1 has no [Unreleased] section" >&2
+        exit 1
+    }
     grep '^## ' "$file" | grep -v '^## \[Unreleased\]$' | while read -r heading; do
         echo "$heading" | grep -Eq '^## \[[0-9]+\.[0-9]+\.[0-9]+\] - [0-9]{4}-[0-9]{2}-[0-9]{2}$' ||
-            { echo "FAIL: $1 has a malformed heading: $heading" >&2; exit 1; }
+            {
+                echo "FAIL: $1 has a malformed heading: $heading" >&2
+                exit 1
+            }
         version=$(echo "$heading" | sed 's/^## \[\(.*\)\].*/\1/')
-        changelog notes "$file" "$version" > /dev/null
+        changelog notes "$file" "$version" >/dev/null
     done
 }
 
@@ -172,9 +179,9 @@ check_tags() {
     for tag in $(git -C "$root" tag -l "$1[0-9]*"); do
         version=${tag#"$1"}
         if [ "$version" = "$3" ]; then
-            changelog release-notes "$root/$2" "$version" > /dev/null
+            changelog release-notes "$root/$2" "$version" >/dev/null
         else
-            changelog notes "$root/$2" "$version" > /dev/null
+            changelog notes "$root/$2" "$version" >/dev/null
         fi
     done
 }

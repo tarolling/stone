@@ -34,7 +34,7 @@ fail() {
 # replaces the file with stdin once the command writing it has succeeded
 replace() {
     tmp="$1.tmp.$$"
-    cat > "$tmp"
+    cat >"$tmp"
     mv "$tmp" "$1"
 }
 
@@ -86,34 +86,34 @@ echo "$version" | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$|
 [ -f "$file" ] || fail "$file does not exist"
 
 case $command in
-    notes)
-        [ $# -eq 3 ] || usage
-        notes=$(section "$file" "$version") || fail "$file has no entry for $version"
-        [ -n "$notes" ] || fail "$file has no entry for $version"
-        printf '%s\n' "$notes" | unwrap
-        ;;
-    release-notes)
-        [ $# -eq 3 ] || usage
-        [ "$version" != Unreleased ] || usage
-        notes=$(section "$file" "$version") || notes=
-        [ -n "$notes" ] || notes=$(section "$file" Unreleased) || notes=
-        [ -n "$notes" ] || fail "$file has no entry for $version and nothing under [Unreleased]"
-        printf '%s\n' "$notes" | unwrap
-        ;;
-    release)
-        [ $# -le 4 ] || usage
-        [ "$version" != Unreleased ] || usage
-        date=${4:-$(date +%Y-%m-%d)}
-        echo "$date" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || usage
-        if section "$file" "$version" > /dev/null; then
-            fail "$file already has an entry for $version"
-        fi
-        unreleased=$(section "$file" Unreleased) || fail "$file has no [Unreleased] section"
-        [ -n "$unreleased" ] || fail "nothing to release, since the [Unreleased] section of $file is empty"
-        awk -v release="## [$version] - $date" '
+notes)
+    [ $# -eq 3 ] || usage
+    notes=$(section "$file" "$version") || fail "$file has no entry for $version"
+    [ -n "$notes" ] || fail "$file has no entry for $version"
+    printf '%s\n' "$notes" | unwrap
+    ;;
+release-notes)
+    [ $# -eq 3 ] || usage
+    [ "$version" != Unreleased ] || usage
+    notes=$(section "$file" "$version") || notes=
+    [ -n "$notes" ] || notes=$(section "$file" Unreleased) || notes=
+    [ -n "$notes" ] || fail "$file has no entry for $version and nothing under [Unreleased]"
+    printf '%s\n' "$notes" | unwrap
+    ;;
+release)
+    [ $# -le 4 ] || usage
+    [ "$version" != Unreleased ] || usage
+    date=${4:-$(date +%Y-%m-%d)}
+    echo "$date" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$' || usage
+    if section "$file" "$version" >/dev/null; then
+        fail "$file already has an entry for $version"
+    fi
+    unreleased=$(section "$file" Unreleased) || fail "$file has no [Unreleased] section"
+    [ -n "$unreleased" ] || fail "nothing to release, since the [Unreleased] section of $file is empty"
+    awk -v release="## [$version] - $date" '
             !done && $0 == "## [Unreleased]" { print; print ""; print release; done = 1; next }
             { print }
         ' "$file" | replace "$file"
-        ;;
-    *) usage ;;
+    ;;
+*) usage ;;
 esac

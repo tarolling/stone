@@ -77,16 +77,16 @@ expect "$(grep -m1 '^version' "$work/repo/Cargo.toml")" 'version = "2.0.0"'
 expect "$(locked Cargo.lock stone)" 'version = "2.0.0"'
 
 echo "test: stone leaves the server and extension alone"
-expect "$(grep -m1 '^version' "$work/repo/lsp/Cargo.toml")" 'version = "0.4.5"'
-expect "$(locked Cargo.lock stone-lsp)" 'version = "0.4.5"'
+expect "$(grep -m1 '^version' "$work/repo/lsp/Cargo.toml")" 'version = "12.3.1"'
+expect "$(locked Cargo.lock stone-lsp)" 'version = "12.3.1"'
 
 echo "test: vscode bumps the extension and the server together"
 reset
 bump vscode minor >/dev/null
-expect "$(grep -m1 '^version' "$work/repo/lsp/Cargo.toml")" 'version = "0.5.0"'
-expect "$(locked Cargo.lock stone-lsp)" 'version = "0.5.0"'
-expect "$(grep -m1 '^  "version"' "$work/repo/editors/vscode/package.json")" '  "version": "0.5.0",'
-expect "$(grep -c '"version": "0.5.0"' "$work/repo/editors/vscode/package-lock.json")" 2
+expect "$(grep -m1 '^version' "$work/repo/lsp/Cargo.toml")" 'version = "12.4.0"'
+expect "$(locked Cargo.lock stone-lsp)" 'version = "12.4.0"'
+expect "$(grep -m1 '^  "version"' "$work/repo/editors/vscode/package.json")" '  "version": "12.4.0",'
+expect "$(grep -c '"version": "12.4.0"' "$work/repo/editors/vscode/package-lock.json")" 2
 expect "$(grep -m1 '^version' "$work/repo/Cargo.toml")" 'version = "1.2.3"'
 
 echo "test: the edited files are still valid"
@@ -107,7 +107,7 @@ case $output in
 esac
 output=$(bump vscode patch)
 case $output in
-*"git tag vscode-v0.4.6"*) ;;
+*"git tag vscode-v12.3.2"*) ;;
 *)
     echo "FAIL: no tag command in: $output" >&2
     exit 1
@@ -135,11 +135,11 @@ expect "$(grep -c '^## \[1.2.3\]' "$work/repo/editors/vscode/CHANGELOG.md")" 0
 
 echo "test: vscode looks for its own tag"
 bump vscode patch >/dev/null
-expect "$(grep -c '^## \[0.4.5\]' "$work/repo/editors/vscode/CHANGELOG.md")" 0
-tag vscode-v0.4.6 2026-03-05
+expect "$(grep -c '^## \[12.3.1\]' "$work/repo/editors/vscode/CHANGELOG.md")" 0
+tag vscode-v12.3.2 2026-03-05
 bump vscode patch >/dev/null
 expect "$(grep -A 4 '^## \[Unreleased\]$' "$work/repo/editors/vscode/CHANGELOG.md")" \
-    "$(printf '## [Unreleased]\n\n## [0.4.6] - 2026-03-05\n\n- a change to the extension')"
+    "$(printf '## [Unreleased]\n\n## [12.3.2] - 2026-03-05\n\n- a change to the extension')"
 
 echo "test: a version that is already dated stays as it is"
 reset

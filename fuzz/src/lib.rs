@@ -1233,6 +1233,21 @@ mod tests {
             .collect()
     }
 
+    /// Returns what `stone check` reports about `source`, but for the warnings of the lints the
+    /// generator sets off on purpose: a division by a zero worked out from literals, which
+    /// fails at run time as both backends must alike, and a map literal giving a key twice.
+    fn problems(source: &str) -> Vec<stone::diagnostic::Diagnostic> {
+        use stone::explain::Lint;
+        let deliberate = [Lint::AlwaysFails.id(), Lint::DuplicateKey.id()];
+        stone::driver::check(source)
+            .into_iter()
+            .filter(|d| {
+                d.severity != stone::diagnostic::Severity::Warning
+                    || !d.code().is_some_and(|code| deliberate.contains(&code))
+            })
+            .collect()
+    }
+
     #[test]
     fn generated_programs_parse() {
         for seed in 0..2_000 {
@@ -1264,7 +1279,7 @@ mod tests {
         for seed in 0..2_000 {
             let data = bytes(seed, 512);
             let source = generate(&mut Unstructured::new(&data)).unwrap();
-            let diagnostics = stone::driver::check(&source);
+            let diagnostics = problems(&source);
             if let Some(first) = diagnostics.first() {
                 panic!("generated program failed to check ({first}):\n{source}");
             }
@@ -1586,7 +1601,7 @@ mod tests {
     #[test]
     fn compound_programs_type_check() {
         for source in compound_sources(1_000) {
-            let diagnostics = stone::driver::check(&source);
+            let diagnostics = problems(&source);
             if let Some(first) = diagnostics.first() {
                 panic!("generated program failed to check ({first}):\n{source}");
             }

@@ -38,15 +38,19 @@ pub enum Failure {
     Silent,
 }
 
-/// Evaluates the value of a constant, `expr`, asking `lookup` for each name it reads: the value
-/// of a constant (`Some(Ok(..))`), a constant with no value (`Some(Err(()))`), or `None` for a
-/// name that is no constant.
+/// What a lookup answers for a name: the value of a constant (`Some(Ok(..))`), a constant with
+/// no value (`Some(Err(()))`), or `None` for a name that is no constant.
+///
+/// For example, a lookup of `step` with `const step = 3` answers `Some(Ok(ConstValue::Int(3)))`.
+type Lookup = Option<Result<ConstValue, ()>>;
+
+/// Evaluates the value of a constant, `expr`, asking `lookup` for each name it reads.
 ///
 /// For example, `2 * step + 1` with `step` a constant of 3 gives `Int(7)`, and `1 / 0` gives
 /// `Failure::Fails` with `division by zero` at the division.
 pub fn evaluate(
     expr: &Expr,
-    lookup: &mut dyn FnMut(&str, Span) -> Option<Result<ConstValue, ()>>,
+    lookup: &mut dyn FnMut(&str, Span) -> Lookup,
 ) -> Result<ConstValue, Failure> {
     let not = |what: &str| Err(Failure::NotConstant(expr.span, what.to_string()));
     match &expr.kind {

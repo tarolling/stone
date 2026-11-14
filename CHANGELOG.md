@@ -10,39 +10,7 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
-### Added
-
-- Constants: `const port = 53` at the top level of any file, library modules included, and
-  `pub const` to use one from other files (`limits.most`, or `most` after `use limits.most`).
-  A constant's value is worked out when the program is built, from literals, other constants,
-  `math.pi`, `math.tau`, `math.e`, the operators, and tuples, exactly as it would be computed at
-  runtime, so an operation that would fail, such as `1 / 0`, fails the build instead (error
-  `E0050`, as are a call, a variable, or a list in one). Code anywhere in the file reads a
-  constant, before or after its line, test blocks included; nothing assigns it, and no variable
-  takes its name. Every read compiles to the value itself. `stone check` warns about an unused
-  private constant, and editors hover a constant with its value.
-- Lints: every warning has an id, `W0001` on, shown as `warning[W0004]`, and a name, such as
-  `lost_change`, which `stone explain W0004` (or `stone explain lost_change`) explains with an
-  example, and the documentation's new Lints page lists, editors linking each warning there. A `[lints]` table in `stone.toml` sets each lint's level by name (`"allow"`, `"warn"`, or
-  `"deny"`, which makes its warnings errors that keep their id), `warnings` setting the rest, and
-  `stone check --deny warnings` makes every warning an error, for CI. No warning is reported in
-  stone's own modules or in the packages a program uses.
-- New lints, which `run`, `build`, and `test` print too: code after a statement that always
-  leaves (`W0006`), a `result` dropped by a statement (`W0007`), an expression statement that
-  calls nothing, such as `x == 1` for `x = 1` (`W0008`), a conversion to the type a value
-  already has (`W0009`), `x == true` (`W0010`), a value compared with itself (`W0011`), `x = x`
-  (`W0012`), a key given twice in a map or set literal (`W0013`), a condition an `elif` chain
-  already tested (`W0014`), and a division, remainder, or shift by a constant that always fails
-  (`W0015`). Literals alone, as in `1 == 1` or `1 / 0`, are not reported. The fixes some of them suggest are
-  quick fixes in editors.
-
-### Changed
-
-- `net` and `gui` keep their fixed values as constants rather than functions returning them.
-- `stone explain` without a code it knows names the closest error code, lint id, or lint name.
-- The `For more about this error` line after a check names only errors' codes, never a warning's.
-
-## [0.4.6] - 2026-11-12
+## [0.4.6] - 2026-11-13
 
 ### Added
 
@@ -100,6 +68,30 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   20 frames are written, then `... and 11 more calls`. Calls inside the prelude and `net`, `gui`,
   and `json` are left out.
 
+- Constants: `const port = 53` at the top level of any file, library modules included, and
+  `pub const` to use one from other files (`limits.most`, or `most` after `use limits.most`).
+  A constant's value is worked out when the program is built, from literals, other constants,
+  `math.pi`, `math.tau`, `math.e`, the operators, and tuples, exactly as it would be computed at
+  runtime, so an operation that would fail, such as `1 / 0`, fails the build instead (error
+  `E0050`, as are a call, a variable, or a list in one). Code anywhere in the file reads a
+  constant, before or after its line, test blocks included; nothing assigns it, and no variable
+  takes its name. Every read compiles to the value itself. `stone check` warns about an unused
+  private constant, and editors hover a constant with its value.
+- Lints: every warning has an id, `W0001` on, shown as `warning[W0004]`, and a name, such as
+  `lost_change`, which `stone explain W0004` (or `stone explain lost_change`) explains with an
+  example, and the documentation's new Lints page lists, editors linking each warning there. A `[lints]` table in `stone.toml` sets each lint's level by name (`"allow"`, `"warn"`, or
+  `"deny"`, which makes its warnings errors that keep their id), `warnings` setting the rest, and
+  `stone check --deny warnings` makes every warning an error, for CI. No warning is reported in
+  stone's own modules or in the packages a program uses.
+- New lints, which `run`, `build`, and `test` print too: code after a statement that always
+  leaves (`W0006`), a `result` dropped by a statement (`W0007`), an expression statement that
+  calls nothing, such as `x == 1` for `x = 1` (`W0008`), a conversion to the type a value
+  already has (`W0009`), `x == true` (`W0010`), a value compared with itself (`W0011`), `x = x`
+  (`W0012`), a key given twice in a map or set literal (`W0013`), a condition an `elif` chain
+  already tested (`W0014`), and a division, remainder, or shift by a constant that always fails
+  (`W0015`). Literals alone, as in `1 == 1` or `1 / 0`, are not reported. The fixes some of them suggest are
+  quick fixes in editors.
+
 ### Changed
 
 - Arguments for a program that `stone run` (or `stone FILE`) runs now go after `--`, as in
@@ -108,6 +100,10 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - `stone build` now names a project's executable after the package, the `name` in its `stone.toml`,
   so `my-app/main.stn` of a package `my_app` builds `my-app/build/my_app`. A `main.stn` with no
   `stone.toml` naming a package is still named after its directory.
+
+- `net` and `gui` keep their fixed values as constants rather than functions returning them.
+- `stone explain` without a code it knows names the closest error code, lint id, or lint name.
+- The `For more about this error` line after a check names only errors' codes, never a warning's.
 
 ### Fixed
 

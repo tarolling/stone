@@ -202,6 +202,10 @@ impl AssemblyGenerator for X64Generator {
     fn set_tests(&mut self, tests: Vec<String>) {
         self.ctx.tests = Some(tests);
     }
+
+    fn set_optimizer(&mut self, options: crate::codegen::ir::opt::Options) {
+        self.ctx.optimizer = options;
+    }
 }
 
 /// Returns whether x86-64 at `level`, `v2` or above, has SSE4.1, as `roundsd` needs.
@@ -1219,10 +1223,9 @@ mod tests {
 
     #[test]
     fn float_arithmetic_uses_sse() {
-        let assembly = assemble(
-            "a = 1.5\nc = float(\"1.5\").unwrap()\nb = -c * 2.0 + c / 0.5\nprint(a < b)\n",
-        )
-        .unwrap();
+        let assembly =
+            assemble("a = 1.5\nc = float(\"1.5\").unwrap()\nb = -c * 2.0 + c / c\nprint(a < b)\n")
+                .unwrap();
         for instruction in [
             "\tmulsd\t",
             "\taddsd\t",
@@ -1235,7 +1238,7 @@ mod tests {
         }
         // 1.5 is loaded by its bits
         assert!(assembly.contains("\tmov\trax, 4609434218613702656"));
-        // even a literal float divisor is checked, unlike an int one
+        // a float divisor that may be zero is checked
         assert!(assembly.contains("division by zero"));
     }
 
@@ -1607,7 +1610,7 @@ mod tests {
         }
 
         let draws = assemble_linked(
-            "use random\nn = int(\"2\").unwrap()\nprint(random.random(), random.randint(1, n), random.choice([3]))\n",
+            "use random\nn = int(\"2\").unwrap()\nprint(random.random(), random.randint(1, n), random.choice(args()))\n",
         );
         for label in ["stone.random_float:", "stone.random_below:"] {
             assert!(draws.contains(label), "{label} in {draws}");

@@ -2,16 +2,16 @@
 //! formatting the results table.
 //!
 //! Each benchmark is a set of files in `bench/programs/` sharing a stem, such as `fib.stn`,
-//! `fib.c`, `fib.py`, and `fib.out`, where the `.out` file holds what all three must print. A
-//! benchmark may also have a `.args` file, such as `fib.args`, whose lines are the command-line
-//! arguments every version runs with, and a benchmark of arithmetic on lists may have a numpy
-//! version, such as `vector.np.py`.
+//! `fib.c`, `fib.rs`, `fib.py`, and `fib.out`, where the `.out` file holds what all of them must
+//! print. A benchmark may also have a `.args` file, such as `fib.args`, whose lines are the
+//! command-line arguments every version runs with, a tuned Rust version, such as
+//! `matmul.fast.rs`, and, for arithmetic on lists, a numpy version, such as `vector.np.py`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// The file extensions every benchmark needs besides its `.stn` source.
-pub const SIBLINGS: [&str; 3] = ["c", "py", "out"];
+pub const SIBLINGS: [&str; 4] = ["c", "rs", "py", "out"];
 
 /// One benchmark, written once in each language.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,13 @@ impl Program {
         self.file("np.py").is_file()
     }
 
+    /// Returns whether the program has a tuned Rust version, `<name>.fast.rs`, written the way an
+    /// expert would for speed (arenas, flat arrays, unchecked access behind a proof), where
+    /// `<name>.rs` is idiomatic safe Rust.
+    pub fn has_fast_rust(&self) -> bool {
+        self.file("fast.rs").is_file()
+    }
+
     /// Returns the arguments every version of the program runs with, one per line of
     /// `<name>.args`, or none if there is no such file.
     ///
@@ -52,8 +59,8 @@ impl Program {
 
 /// Returns every benchmark in `dir`, sorted by name, or an error naming the first missing file.
 ///
-/// For example, a directory holding `fib.stn`, `fib.c`, `fib.py`, and `fib.out` gives one
-/// `Program` named `fib`, and removing `fib.py` makes it an error.
+/// For example, a directory holding `fib.stn`, `fib.c`, `fib.rs`, `fib.py`, and `fib.out` gives
+/// one `Program` named `fib`, and removing `fib.py` makes it an error.
 pub fn discover(dir: &Path) -> Result<Vec<Program>, String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut programs = Vec::new();
@@ -80,6 +87,31 @@ pub fn discover(dir: &Path) -> Result<Vec<Program>, String> {
     programs.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(programs)
 }
+
+/// Returns how many checks inside loops the `stone stats total` line of `stderr` reports, as a
+/// build with `STONE_STATS` set writes it.
+///
+/// For example, `stone stats total: checks=12/3 index=5/2 ...` gives `Some(3)`.
+pub fn checks_in_loops(stderr: &str) -> Option<usize> {
+    let line = stderr
+        .lines()
+        .find(|line| line.starts_with("stone stats total: "))?;
+    let counts = line.split_whitespace().find_map(|word| word.strip_prefix("checks="))?;
+    counts.split_once('/')?.1.parse().ok()
+}
+
+/// The flags every Rust version is built with: full optimization in one codegen unit, aborting on
+/// panic, and the baseline processor, as stone builds for by default.
+pub const RUSTC_FLAGS: [&str; 8] = [
+    "--edition",
+    "2024",
+    "-C",
+    "opt-level=3",
+    "-C",
+    "codegen-units=1",
+    "-C",
+    "panic=abort",
+];
 
 /// Returns the smallest of `times`, or zero if there are none.
 ///
@@ -157,6 +189,38 @@ pub struct Row {
     pub numpy: Option<Duration>,
     /// The summarized time of the stone version under `stone run`, the interpreter, if it ran.
     pub interpreter: Option<Duration>,
+    /// The summarized time of the idiomatic Rust version, if rustc was found.
+    pub rust: Option<Duration>,
+    /// The summarized time of the tuned Rust version, if the benchmark has one and rustc was
+    /// found.
+    pub rust_fast: Option<Duration>,
+    /// How many checks the stone version still makes inside loops, counted in its optimized IR
+    /// (see `stone::codegen::ir::stats`), if they were asked for.
+    pub checks: Option<usize>,
+}
+
+impl Row {
+    /// Returns a row of `times` with nothing optional measured.
+    pub fn new(name: &str, times: [Duration; 4]) -> Row {
+        Row {
+            name: name.to_string(),
+            times,
+            numpy: None,
+            interpreter: None,
+            rust: None,
+            rust_fast: None,
+            checks: None,
+        }
+    }
+
+    /// Returns the fastest Rust time: the tuned version's if there is one, else the idiomatic
+    /// one's.
+    pub fn best_rust(&self) -> Option<Duration> {
+        match (self.rust, self.rust_fast) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        }
+    }
 }
 
 impl Row {
@@ -173,95 +237,118 @@ impl Row {
 /// Formats `rows` as a Markdown table of times in milliseconds, with the ratios of stone to
 /// C -O2 and of Python to stone, and a final row holding the geometric mean of each ratio. If any
 /// row has a numpy time, the table also has its time and the ratio of numpy to stone, left blank
-/// for the rows without one. If any row has an interpreter time, the table ends with it and the
-/// ratio of the interpreter to Python, how many times slower `stone run` is.
+/// for the rows without one. If any row has a Rust time, the table has the idiomatic and tuned
+/// Rust times and the ratios of stone to idiomatic Rust and to the best Rust. If any row has a
+/// count of checks, the table has it. If any row has an interpreter time, the table ends with it
+/// and the ratio of the interpreter to Python, how many times slower `stone run` is.
 ///
 /// For example, a `fib` row of 10, 30, 50, and 400 ms gives
 /// `| fib | 10.0 | 30.0 | 50.0 | 400.0 | 5.0x | 8.0x |`.
 pub fn format_table(rows: &[Row]) -> String {
     let with_numpy = rows.iter().any(|row| row.numpy.is_some());
+    let with_rust = rows.iter().any(|row| row.rust.is_some());
+    let with_checks = rows.iter().any(|row| row.checks.is_some());
     let with_interpreter = rows.iter().any(|row| row.interpreter.is_some());
-    let mut table = String::from("| program |");
+    let mut header = vec!["program".to_string()];
     for implementation in Implementation::ALL {
-        table.push_str(&format!(" {} (ms) |", implementation.label()));
+        header.push(format!("{} (ms)", implementation.label()));
     }
     if with_numpy {
-        table.push_str(" numpy (ms) |");
+        header.push("numpy (ms)".into());
     }
-    table.push_str(" stone / C -O2 | Python / stone |");
+    if with_rust {
+        header.extend(["Rust (ms)".into(), "Rust fast (ms)".into()]);
+    }
+    header.push("stone / C -O2".into());
+    if with_rust {
+        header.extend(["stone / Rust".into(), "stone / best Rust".into()]);
+    }
+    header.push("Python / stone".into());
     if with_numpy {
-        table.push_str(" numpy / stone |");
+        header.push("numpy / stone".into());
+    }
+    if with_checks {
+        header.push("checks in loops".into());
     }
     if with_interpreter {
-        table.push_str(" stone run (ms) | stone run / Python |");
+        header.extend(["stone run (ms)".into(), "stone run / Python".into()]);
     }
-    let columns =
-        Implementation::ALL.len() + 2 + 2 * with_numpy as usize + 2 * with_interpreter as usize;
-    table.push_str("\n|---|");
-    table.push_str(&"---:|".repeat(columns));
+    let mut table = format!("| {} |\n|---|", header.join(" | "));
+    table.push_str(&"---:|".repeat(header.len() - 1));
     table.push('\n');
 
     let ms = |time: Duration| format!("{:.1}", time.as_secs_f64() * 1_000.0);
-    let mut stone_vs_c = Vec::new();
-    let mut python_vs_stone = Vec::new();
-    let mut numpy_vs_stone = Vec::new();
-    let mut interpreter_vs_python = Vec::new();
+    let optional = |time: Option<Duration>| time.map(ms).unwrap_or_default();
+    let ratio = |r: Option<f64>| r.map(|r| format!("{r:.1}x")).unwrap_or_default();
+    let mut means: Vec<Vec<f64>> = vec![Vec::new(); header.len()];
     for row in rows {
-        table.push_str(&format!("| {} |", row.name));
-        for time in row.times {
-            table.push_str(&format!(" {} |", ms(time)));
-        }
         let stone = row.time(Implementation::Stone).as_secs_f64();
+        let python_time = row.time(Implementation::Python).as_secs_f64();
+        // each cell, and the ratio it adds to its column's geometric mean
+        let mut cells: Vec<(String, Option<f64>)> = vec![(row.name.clone(), None)];
+        for time in row.times {
+            cells.push((ms(time), None));
+        }
         let numpy = row.numpy.map(|time| time.as_secs_f64() / stone);
         if with_numpy {
-            match row.numpy {
-                Some(time) => table.push_str(&format!(" {} |", ms(time))),
-                None => table.push_str(" |"),
-            }
+            cells.push((optional(row.numpy), None));
+        }
+        if with_rust {
+            cells.push((optional(row.rust), None));
+            cells.push((optional(row.rust_fast), None));
         }
         let c = stone / row.time(Implementation::COptimized).as_secs_f64();
-        let python = row.time(Implementation::Python).as_secs_f64() / stone;
-        table.push_str(&format!(" {c:.1}x | {python:.1}x |"));
+        cells.push((ratio(Some(c)), Some(c)));
+        if with_rust {
+            let rust = row.rust.map(|time| stone / time.as_secs_f64());
+            let best = row.best_rust().map(|time| stone / time.as_secs_f64());
+            cells.push((ratio(rust), rust));
+            cells.push((ratio(best), best));
+        }
+        let python = python_time / stone;
+        cells.push((ratio(Some(python)), Some(python)));
         if with_numpy {
-            match numpy {
-                Some(ratio) => table.push_str(&format!(" {ratio:.1}x |")),
-                None => table.push_str(" |"),
-            }
+            cells.push((ratio(numpy), numpy));
         }
-        let python_time = row.time(Implementation::Python).as_secs_f64();
-        let interpreter = row.interpreter.map(|time| time.as_secs_f64() / python_time);
+        if with_checks {
+            cells.push((row.checks.map(|n| n.to_string()).unwrap_or_default(), None));
+        }
         if with_interpreter {
-            match (row.interpreter, interpreter) {
-                (Some(time), Some(ratio)) => {
-                    table.push_str(&format!(" {} | {ratio:.1}x |", ms(time)))
-                }
-                _ => table.push_str(" | |"),
-            }
+            let interpreter = row.interpreter.map(|time| time.as_secs_f64() / python_time);
+            cells.push((optional(row.interpreter), None));
+            cells.push((ratio(interpreter), interpreter));
         }
-        table.push('\n');
-        stone_vs_c.push(c);
-        interpreter_vs_python.extend(interpreter);
-        python_vs_stone.push(python);
-        numpy_vs_stone.extend(numpy);
+        for (column, (_, value)) in cells.iter().enumerate() {
+            means[column].extend(*value);
+        }
+        table.push_str(&table_line(cells.iter().map(|(text, _)| text.as_str())));
     }
-    table.push_str("| geometric mean |");
-    table.push_str(&" |".repeat(Implementation::ALL.len() + with_numpy as usize));
-    table.push_str(&format!(
-        " {:.1}x | {:.1}x |",
-        geometric_mean(&stone_vs_c),
-        geometric_mean(&python_vs_stone)
-    ));
-    if with_numpy {
-        table.push_str(&format!(" {:.1}x |", geometric_mean(&numpy_vs_stone)));
+    let mut last = vec!["geometric mean".to_string()];
+    for values in &means[1..] {
+        last.push(if values.is_empty() {
+            String::new()
+        } else {
+            format!("{:.1}x", geometric_mean(values))
+        });
     }
-    if with_interpreter {
-        table.push_str(&format!(
-            " | {:.1}x |",
-            geometric_mean(&interpreter_vs_python)
-        ));
-    }
-    table.push('\n');
+    table.push_str(&table_line(last.iter().map(String::as_str)));
     table
+}
+
+/// Returns one line of a Markdown table holding `cells`, writing an empty cell as `| |`.
+///
+/// For example, the cells `fib`, ``, and `2.0x` give `| fib | | 2.0x |`.
+fn table_line<'a>(cells: impl Iterator<Item = &'a str>) -> String {
+    let mut line = String::from("|");
+    for cell in cells {
+        if cell.is_empty() {
+            line.push_str(" |");
+        } else {
+            line.push_str(&format!(" {cell} |"));
+        }
+    }
+    line.push('\n');
+    line
 }
 
 #[cfg(test)]
@@ -316,10 +403,12 @@ mod tests {
             &[
                 "sieve.stn",
                 "sieve.c",
+                "sieve.rs",
                 "sieve.py",
                 "sieve.out",
                 "fib.stn",
                 "fib.c",
+                "fib.rs",
                 "fib.py",
                 "fib.out",
                 "notes.txt",
@@ -336,7 +425,7 @@ mod tests {
     #[test]
     fn discover_reports_a_missing_sibling() {
         let dir = scratch("discover_missing");
-        touch(&dir, &["fib.stn", "fib.c", "fib.out"]);
+        touch(&dir, &["fib.stn", "fib.c", "fib.rs", "fib.out"]);
         let error = discover(&dir).unwrap_err();
         assert!(error.contains("fib.py"), "{error}");
     }
@@ -349,12 +438,18 @@ mod tests {
                 times: [ms(10), ms(30), ms(50), ms(400)],
                 numpy: None,
                 interpreter: None,
+                rust: None,
+                rust_fast: None,
+                checks: None,
             },
             Row {
                 name: "sieve".into(),
                 times: [ms(20), ms(40), ms(400), ms(1_600)],
                 numpy: None,
                 interpreter: None,
+                rust: None,
+                rust_fast: None,
+                checks: None,
             },
         ];
         let expected = "\
@@ -375,12 +470,18 @@ mod tests {
                 times: [ms(10), ms(30), ms(50), ms(400)],
                 numpy: None,
                 interpreter: None,
+                rust: None,
+                rust_fast: None,
+                checks: None,
             },
             Row {
                 name: "vector".into(),
                 times: [ms(20), ms(40), ms(25), ms(1_600)],
                 numpy: Some(ms(50)),
                 interpreter: None,
+                rust: None,
+                rust_fast: None,
+                checks: None,
             },
         ];
         let expected = "\
@@ -400,6 +501,9 @@ mod tests {
             times: [ms(10), ms(30), ms(50), ms(400)],
             numpy: None,
             interpreter: Some(ms(2_000)),
+            rust: None,
+            rust_fast: None,
+            checks: None,
         }];
         let expected = "\
 | program | C -O2 (ms) | C -O0 (ms) | stone (ms) | Python (ms) | stone / C -O2 | Python / stone | stone run (ms) | stone run / Python |
@@ -411,15 +515,55 @@ mod tests {
     }
 
     #[test]
+    fn table_adds_rust_and_checks_columns_when_they_were_measured() {
+        let mut fib = Row::new("fib", [ms(10), ms(30), ms(50), ms(400)]);
+        fib.rust = Some(ms(20));
+        fib.checks = Some(2);
+        let mut matmul = Row::new("matmul", [ms(20), ms(40), ms(80), ms(1_600)]);
+        matmul.rust = Some(ms(40));
+        matmul.rust_fast = Some(ms(20));
+        matmul.checks = Some(0);
+        let expected = "\
+| program | C -O2 (ms) | C -O0 (ms) | stone (ms) | Python (ms) | Rust (ms) | Rust fast (ms) | stone / C -O2 | stone / Rust | stone / best Rust | Python / stone | checks in loops |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| fib | 10.0 | 30.0 | 50.0 | 400.0 | 20.0 | | 5.0x | 2.5x | 2.5x | 8.0x | 2 |
+| matmul | 20.0 | 40.0 | 80.0 | 1600.0 | 40.0 | 20.0 | 4.0x | 2.0x | 4.0x | 20.0x | 0 |
+| geometric mean | | | | | | | 4.5x | 2.2x | 3.2x | 12.6x | |
+";
+        assert_eq!(format_table(&[fib, matmul]), expected);
+    }
+
+    #[test]
+    fn checks_in_loops_come_from_the_total_line() {
+        let stderr = "stone stats f: checks=4/4 index=4/4\n\
+                      stone stats total: checks=12/3 index=5/2 division=0/0\nCompiled out\n";
+        assert_eq!(checks_in_loops(stderr), Some(3));
+        assert_eq!(checks_in_loops("Compiled out\n"), None);
+    }
+
+    #[test]
+    fn a_tuned_rust_version_is_optional() {
+        let dir = scratch("discover_fast_rust");
+        touch(&dir, &["fib.stn", "fib.c", "fib.rs", "fib.py", "fib.out"]);
+        touch(
+            &dir,
+            &["sort.stn", "sort.c", "sort.rs", "sort.fast.rs", "sort.py", "sort.out"],
+        );
+        let programs = discover(&dir).unwrap();
+        let fast: Vec<bool> = programs.iter().map(Program::has_fast_rust).collect();
+        assert_eq!(fast, [false, true]);
+    }
+
+    #[test]
     fn a_numpy_version_is_optional() {
         let dir = scratch("discover_numpy");
         touch(
             &dir,
-            &["fib.stn", "fib.c", "fib.py", "fib.out", "vector.stn"],
+            &["fib.stn", "fib.c", "fib.rs", "fib.py", "fib.out", "vector.stn"],
         );
         touch(
             &dir,
-            &["vector.c", "vector.py", "vector.np.py", "vector.out"],
+            &["vector.c", "vector.rs", "vector.py", "vector.np.py", "vector.out"],
         );
         let programs = discover(&dir).unwrap();
         let numpy: Vec<bool> = programs.iter().map(Program::has_numpy).collect();
@@ -429,7 +573,7 @@ mod tests {
     #[test]
     fn args_are_read_one_per_line() {
         let dir = scratch("args_lines");
-        touch(&dir, &["fib.stn", "fib.c", "fib.py", "fib.out"]);
+        touch(&dir, &["fib.stn", "fib.c", "fib.rs", "fib.py", "fib.out"]);
         std::fs::write(dir.join("fib.args"), "35\n10\n").unwrap();
         let programs = discover(&dir).unwrap();
         assert_eq!(programs[0].args().unwrap(), ["35", "10"]);
@@ -438,7 +582,7 @@ mod tests {
     #[test]
     fn args_are_optional() {
         let dir = scratch("args_optional");
-        touch(&dir, &["fib.stn", "fib.c", "fib.py", "fib.out"]);
+        touch(&dir, &["fib.stn", "fib.c", "fib.rs", "fib.py", "fib.out"]);
         let programs = discover(&dir).unwrap();
         assert_eq!(programs[0].args().unwrap(), Vec::<String>::new());
     }

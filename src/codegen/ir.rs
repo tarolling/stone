@@ -20,6 +20,7 @@ pub mod layout;
 pub mod liveness;
 pub mod lower;
 pub mod opt;
+pub mod stats;
 pub mod trig;
 
 use crate::ast::CompOp;
@@ -595,6 +596,20 @@ pub enum Inst {
     /// too many, as the check before every call of a stone function does. It stands for a call
     /// the optimizer inlined, which calls nothing itself, so the limit stays the interpreter's.
     DepthCheck,
+    /// Stops the program with `compiler bug: <what>` if `lhs` compares with `rhs` as `cond`
+    /// (signed ints, or floats as [`Inst::Compare`] compares them when `float`), as in
+    /// `never_lt v3, 0 "ranges"`. It stands for a check an optimizer pass proved never fails and
+    /// removed, which only a build with `STONE_VERIFY_FACTS` set keeps this way, so the golden
+    /// programs and the fuzzer test every proof: after optimizing, `opt::expand_never` turns each
+    /// into a comparison and a branch to the failure. Until then, passes treat it as something
+    /// that never fails but must stay.
+    Never {
+        cond: Cond,
+        float: bool,
+        lhs: Operand,
+        rhs: Operand,
+        what: &'static str,
+    },
     /// Calls a function with `args` and stores its results in `dsts`: none, one, or one for each
     /// value of a tuple a stone function returns, as in `v2, v3 = call divide(v0, v1)`. A call may
     /// change globals and lists, but never a caller's vregs.
@@ -664,6 +679,7 @@ impl Inst {
             | Inst::FieldInit { .. }
             | Inst::Retain { .. }
             | Inst::Release { .. }
+            | Inst::Never { .. }
             | Inst::DepthCheck => None,
         }
     }
@@ -695,7 +711,8 @@ impl Inst {
             | Inst::DepthCheck => vec![],
             Inst::Binary { lhs, rhs, .. }
             | Inst::FloatBinary { lhs, rhs, .. }
-            | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
+            | Inst::Compare { lhs, rhs, .. }
+            | Inst::Never { lhs, rhs, .. } => vec![*lhs, *rhs],
             Inst::LoadGlobal { .. } | Inst::StrAddr { .. } | Inst::BytesAddr { .. } => vec![],
             Inst::ListLen { list, .. } | Inst::ListData { list, .. } => vec![*list],
             Inst::StrLen { text, .. } => vec![*text],
@@ -1206,6 +1223,16 @@ impl fmt::Display for Inst {
             Inst::FunctionAddress { dst, label } => write!(f, "{dst} = fn_addr {label}"),
             Inst::FunctionStatic { dst, label } => write!(f, "{dst} = fn_static {label}"),
             Inst::DepthCheck => write!(f, "depth_check"),
+            Inst::Never {
+                cond,
+                float,
+                lhs,
+                rhs,
+                what,
+            } => {
+                let prefix = if *float { "f" } else { "" };
+                write!(f, "{prefix}never_{} {lhs}, {rhs} {what:?}", cond.name())
+            }
             Inst::Retain { src } => write!(f, "retain {src}"),
             Inst::Release { src, kind } => match kind {
                 RcKind::Str => write!(f, "release_str {src}"),

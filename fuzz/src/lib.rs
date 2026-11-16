@@ -1138,6 +1138,9 @@ fn runner(exe: &Path, target: Target) -> Command {
 
 /// Compiles `source` with `stone build`, runs the binary, and returns its stdout.
 ///
+/// Every check an optimizer pass removed on a proof is kept, failing with `compiler bug` if the
+/// proof was wrong (see `stone::codegen::ir::opt::Options::verify`).
+///
 /// For example, `run_compiled("print(1)\n")` returns `Ok("1\n")`. A compile error, crash, hang,
 /// or string or list the program never freed is returned as `Err` with a description. Setting
 /// `STONE_FUZZ_TARGET=aarch64` on an x86-64 machine (or `x86_64` on an arm64 one) builds for
@@ -1156,7 +1159,9 @@ pub fn run_compiled(source: &str) -> std::result::Result<String, String> {
 
     let result = (|| {
         let target = target();
-        stone::driver::compile_for(source, &exe, target)
+        // every check a pass removed on a proof still runs, so a wrong proof fails the program
+        let options = stone::codegen::ir::opt::Options { verify: true };
+        stone::driver::compile_for_with(source, &exe, target, options)
             .map_err(|e| format!("compile failed: {e}"))?;
 
         // stdout goes to a file, so a chatty program cannot block on a full pipe

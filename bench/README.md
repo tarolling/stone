@@ -1,22 +1,27 @@
 # stone benchmarks
 
-This crate times stone's compiled output (`stone build`) against the same programs written in C and Python, and with `--interpreter`, the interpreter (`stone run`) too.
+This crate times stone's compiled output (`stone build`) against the same programs written in C, Rust, and Python, and with `--interpreter`, the interpreter (`stone run`) too.
 
 ```sh
-cargo run --release --manifest-path bench/Cargo.toml -- [--runs 5] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min] [--interpreter]
+cargo run --release --manifest-path bench/Cargo.toml -- [--runs 5] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min] [--interpreter] [--checks]
 ```
 
-For each benchmark, the runner builds stone in release mode, compiles the `.stn` with `stone build` and the `.c` with `gcc -O2 -fwrapv -ffp-contract=off` and `gcc -O0 -fwrapv -ffp-contract=off` (linking `-lm`), and runs the `.py` with `python3`. Every version runs with the arguments in the benchmark's `.args` file, one per line, as the golden tests' `.args` files are. The runner runs each implementation once untimed and requires its stdout to match the `.out` file exactly. It then times `--runs` more runs, checking the output of each, and prints a Markdown table of the median wall times, or the fastest with `--min`. Progress and warnings go to stderr, so `> results.md` captures only the table. It needs `gcc` and `python3` on `PATH`.
+For each benchmark, the runner builds stone in release mode, compiles the `.stn` with `stone build` and the `.c` with `gcc -O2 -fwrapv -ffp-contract=off` and `gcc -O0 -fwrapv -ffp-contract=off` (linking `-lm`), the `.rs` (and a `.fast.rs`, if the benchmark has one) with `rustc --edition 2024 -C opt-level=3 -C codegen-units=1 -C panic=abort`, and runs the `.py` with `python3`. Every version runs with the arguments in the benchmark's `.args` file, one per line, as the golden tests' `.args` files are. The runner runs each implementation once untimed and requires its stdout to match the `.out` file exactly. It then times `--runs` more runs, checking the output of each, and prints a Markdown table of the median wall times, or the fastest with `--min`. Progress and warnings go to stderr, so `> results.md` captures only the table. It needs `gcc` and `python3` on `PATH`, and leaves the Rust columns out with a warning when `rustc` is missing.
 
 With `--interpreter`, the runner also times each `.stn` under `stone run`, checked against the `.out` file like the others, and adds `stone run (ms)` and `stone run / Python` columns: how many times slower than CPython the interpreter is, lower being better. The workloads are sized for compiled code, so the interpreter takes several seconds on most of them; `--filter` and `--runs 1` keep a run short.
 
 A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, which runs under the Python that `--numpy` names (`python3` by default), such as a virtualenv's `bin/python`, and adds `numpy (ms)` and `numpy / stone` columns. If that Python cannot import numpy, the runner warns and leaves numpy out.
+
+Every benchmark has an idiomatic, safe Rust version, `name.rs` (`Vec`, `Box`, `HashMap`, iterators, and indexing with its bounds checks), and some have a tuned one, `name.fast.rs`, written the way an expert would for speed with the same algorithm: flat arrays, an arena of indexes, a fast hasher, numbers formatted into one buffer, all in safe Rust. They add `Rust (ms)`, `Rust fast (ms)`, `stone / Rust`, and `stone / best Rust` columns, the last against the faster of the two. Beating the tuned version, not only the idiomatic one, is the goal: that is what C or Rust written for speed looks like.
+
+With `--checks`, the runner also builds each `.stn` with `STONE_STATS=1` and adds a `checks in loops` column: how many index, division, call depth, and other checks the optimized code still has inside loops, counted in its IR rather than timed, so a change that proves checks away shows here even when timing is too noisy to. A loop that runs a copy without checks when one test before it allows still counts its checked copy.
 
 `cargo test --manifest-path bench/Cargo.toml` checks the statistics, table, and `.args` code, and that every benchmark still passes stone's checker, without running any workloads.
 
 ## Reading the table
 
 - `stone / C -O2` is how many times slower compiled stone is than optimized C. Lower is better for stone.
+- `stone / Rust` and `stone / best Rust` are how many times slower compiled stone is than idiomatic Rust and than the faster of idiomatic and tuned Rust. Lower is better for stone.
 - `Python / stone` is how many times faster compiled stone is than CPython. Higher is better for stone.
 - `C -O0` is a useful anchor. gcc at `-O0` does no optimization at all and keeps every variable in memory, where stone allocates registers, inlines small functions, folds constants, moves invariant arithmetic out of loops, drops work nothing reads, and removes checks it can prove repeated, though it does far less than gcc at `-O2`.
 - The geometric mean row summarizes the ratios, treating 2x faster and 2x slower symmetrically.
@@ -45,9 +50,9 @@ A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, 
 
 Each workload size is in the benchmark's `.args` file, so every version reads it at runtime and gcc cannot specialize on a constant size. Sizes are chosen so `gcc -O2` takes at least about 40 ms and the whole suite finishes in a few minutes. The runner warns when any time is under 10 ms, which usually means gcc optimized the work away.
 
-The versions are meant to be written naturally in each language, not to mimic each other instruction by instruction, so the C versions format numbers into a buffer instead of allocating a string for each, use a hand-written hash table in `wordcount`, and free trees with an explicit walk in `binary_trees`. Every program keeps integers nonnegative and within 64 bits, so stone's `/` and `%`, which truncate like C's, give the same output as Python's `//` and `%`, which round down. Programs with floats print them scaled to an int, so C need not print floats the way stone does, and add them in the same order in all three versions, so they round identically. `-ffp-contract=off` keeps gcc from fusing a multiply and an add, which stone never does, on targets with FMA.
+The versions are meant to be written naturally in each language, not to mimic each other instruction by instruction, so the C versions format numbers into a buffer instead of allocating a string for each, use a hand-written hash table in `wordcount`, and free trees with an explicit walk in `binary_trees`. Every program keeps integers nonnegative and within 64 bits, so stone's `/` and `%`, which truncate like C's, give the same output as Python's `//` and `%`, which round down. Programs with floats print them scaled to an int, so C need not print floats the way stone does, and add them in the same order in every version, so they round identically. `-ffp-contract=off` keeps gcc from fusing a multiply and an add, which stone never does, on targets with FMA.
 
-To add a benchmark, write `name.stn`, `name.c`, and `name.py`, put the hot loop inside a function, read the workload size from the arguments, and save the arguments as `name.args` and the shared output as `name.out`.
+To add a benchmark, write `name.stn`, `name.c`, `name.rs`, and `name.py` (and `name.fast.rs` if a tuned Rust version would differ), put the hot loop inside a function, read the workload size from the arguments, and save the arguments as `name.args` and the shared output as `name.out`.
 
 ## Baseline
 

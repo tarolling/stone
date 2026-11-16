@@ -10,6 +10,28 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `STONE_VERIFY_FACTS=1 stone build` keeps every check an optimization proved never fails and
+  removed, as a check that stops the program with `compiler bug: <pass> removed a check that
+  fails` if the proof was wrong, so a mistaken proof shows up rather than reading outside a list.
+  The golden programs and the differential fuzzer build this way too.
+- `STONE_STATS=1 stone build` prints, for each function and in total, the checks, uniqueness
+  checks, reference counting, and allocations its optimized code still makes, each as all of them
+  and those inside loops. The benchmark runner's `--checks` shows the checks inside loops.
+- The benchmarks have Rust versions: an idiomatic, safe one for each, and a tuned one for
+  `binary_trees`, `matmul`, `matmul_float`, `strings`, and `wordcount`, timed beside C when
+  `rustc` is on `PATH`.
+
+### Changed
+
+- Compiled code removes checks that facts about its values prove never fail: an index from 0 to
+  below its list's length (by a `while` loop's test as well as a `range`, and into a list of
+  structs, as in `for j in range(i + 1, n)`, or into a list a loop of appends built, which is as
+  long as its appends), a branch whose comparison the bounds decide, the
+  check that `math.sqrt`'s argument is not negative when it is a sum of squares, and the check of
+  a float division by a constant other than zero. `nbody`'s loops now make no index checks.
+
 ## [0.4.6] - 2026-11-13
 
 ### Added

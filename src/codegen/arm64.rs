@@ -199,6 +199,10 @@ impl AssemblyGenerator for Arm64Generator {
     fn set_tests(&mut self, tests: Vec<String>) {
         self.ctx.tests = Some(tests);
     }
+
+    fn set_optimizer(&mut self, options: crate::codegen::ir::opt::Options) {
+        self.ctx.optimizer = options;
+    }
 }
 
 impl Default for Arm64Generator {
@@ -1093,7 +1097,7 @@ mod tests {
     #[test]
     fn float_comparisons_use_conditions_that_are_false_for_nan() {
         let assembly = assemble(
-            "a = 1.5\nc = float(\"1.5\").unwrap()\nb = -c * 2.0 + c / 0.5\nprint(a < b, a <= b)\n",
+            "a = 1.5\nc = float(\"1.5\").unwrap()\nb = -c * 2.0 + c / c\nprint(a < b, a <= b)\n",
         )
         .unwrap();
         for instruction in [
@@ -1101,7 +1105,7 @@ mod tests {
         ] {
             assert!(assembly.contains(instruction), "{instruction}");
         }
-        // even a literal float divisor is checked, unlike an int one
+        // a float divisor that may be zero is checked
         assert!(assembly.contains("division by zero"));
     }
 
@@ -1335,7 +1339,7 @@ mod tests {
         }
 
         let draws = assemble_linked(
-            "use random\nn = int(\"2\").unwrap()\nprint(random.random(), random.randint(1, n), random.choice([3]))\n",
+            "use random\nn = int(\"2\").unwrap()\nprint(random.random(), random.randint(1, n), random.choice(args()))\n",
         );
         for label in ["stone.random_float:", "stone.random_below:"] {
             assert!(draws.contains(label), "{label} in {draws}");

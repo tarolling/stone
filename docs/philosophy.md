@@ -245,7 +245,10 @@ loop never changes before the loop, drops work and whole loops whose results not
 loop only when it is sure to end, so a program that never stops still never stops), removes
 index checks, reads, and uniqueness checks it can prove repeated (moving those a loop repeats
 before it) and index checks a loop's own test proves (comparing a loop's bound with a list's
-length once, before the loop, when the bound is not the length itself), allocates registers with linear scan, keeping floats in the processor's
+length once, before the loop, when the bound is not the length itself), removes checks that
+facts about values prove never fail (an index from 0 to below its list's length, by any loop's
+test or by the appends that built the list, a branch whose comparison those bounds decide, and
+the domain check of `math.sqrt` on a sum of squares), allocates registers with linear scan, keeping floats in the processor's
 floating-point registers, and specializes a few cases such as division and
 remainder by a constant, which multiply by a magic number, and constants and globals that hold
 one literal for the whole program, which read as that literal. Arithmetic on whole lists, such as `a * 2.0 + b`,
@@ -309,6 +312,21 @@ are future work, as are AMD GPUs.
 Vector code beyond arithmetic on lists (searching strings, comparing lists, summing them),
 splitting a value's live range around calls, and removing reference counts it can prove
 redundant beyond moves at last use are future work.
+
+Proofs are how stone means to reach C's speed without giving up a check: the facts that make an
+access safe are the same ones that let the compiler drop its check, so the language keeps every
+check and the compiler's job is to prove each one away, never to let the programmer turn it off.
+The facts are inferred, as types are, never written as refinement types or regions, and they are
+a small, decidable kind (bounds between ints and lengths, signs of floats) so building stays fast.
+A proof the compiler gets wrong would be unsafe, so a build with `STONE_VERIFY_FACTS` set keeps
+every check it removed, failing with `compiler bug` if one would fail, and the golden programs and
+the fuzzer run that way. `STONE_STATS` counts the checks, counting, and allocation a program still
+does, so each step shows what it removed. The next steps: one guard before a loop nest for the
+rows of a list of lists (`matmul`), keeping fields of a list element in registers across a loop
+that provably never touches it (`nbody`), reserving room for appends a loop's count bounds,
+allocating values that never escape a statement from a region freed at once (`binary_trees`),
+and choosing smaller layouts, such as bytes for a list that only holds 0 and 1, from what the
+facts show.
 
 ## Errors like Rust
 

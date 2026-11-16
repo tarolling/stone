@@ -509,6 +509,19 @@ pub(super) fn rename_inst(
             label,
         },
         Inst::DepthCheck => Inst::DepthCheck,
+        Inst::Never {
+            cond,
+            float,
+            lhs,
+            rhs,
+            what,
+        } => Inst::Never {
+            cond,
+            float,
+            lhs: o(lhs),
+            rhs: o(rhs),
+            what,
+        },
         Inst::Call { dsts, callee, args } => Inst::Call {
             dsts: dsts.into_iter().map(reg).collect(),
             callee: match callee {

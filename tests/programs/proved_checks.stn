@@ -1,0 +1,77 @@
+// checks the compiler proves never fail and removes, which must compute exactly what checked
+// code does
+use math
+
+struct P:
+    x: float
+    y: float
+
+// a while loop's test proves the index in range, as range does
+fn total(xs: list[int]) -> int:
+    t = 0
+    i = 0
+    n = xs.len()
+    while i < n:
+        t += xs[i]
+        i += 1
+    ret t
+
+// j is above i and below the number of elements
+fn closest(ps: list[P]) -> float:
+    best = 1000000.0
+    n = ps.len()
+    for i in range(n):
+        for j in range(i + 1, n):
+            dx = ps[i].x - ps[j].x
+            dy = ps[i].y - ps[j].y
+            // a sum of squares is never below zero, so sqrt needs no check
+            d = math.sqrt(dx * dx + dy * dy)
+            if d < best:
+                best = d
+    ret best
+
+// every other element, from the end, by an index counted down to 0
+fn backward(xs: list[int]) -> list[int]:
+    out = []
+    i = xs.len() - 1
+    while i >= 0:
+        out.append(xs[i])
+        i -= 2
+    ret out
+
+// a float divided by a constant other than zero cannot divide by zero
+fn halves(xs: list[float]) -> float:
+    t = 0.0
+    for x in xs:
+        t += x / 4.0 + x / -0.5
+    ret t
+
+// a branch whose test the bounds decide
+fn clamp_index(xs: list[int], k: int) -> int:
+    if k < 0 or k >= xs.len():
+        ret -1
+    if k >= 0:
+        ret xs[k]
+    ret -2
+
+// a list built by appends from empty is as long as its appends, so the loop after it needs no
+// check
+fn built(n: int) -> int:
+    xs = []
+    for i in range(n):
+        xs.append(i * i)
+    t = 0
+    for i in range(n):
+        t += xs[i]
+    ret t
+
+ps = [P(x=0.0, y=0.0), P(x=3.0, y=4.0), P(x=1.0, y=1.0), P(x=10.0, y=-2.0)]
+print(total([1, 2, 3, 4, 5]), total([]))
+print(closest(ps))
+print(backward([1, 2, 3, 4, 5, 6, 7]))
+print(halves([1.0, 2.0, -4.0]))
+print(built(5), built(0))
+print(clamp_index([5, 6, 7], 1), clamp_index([5, 6, 7], 3), clamp_index([5, 6, 7], -1))
+// nan is not below zero, so sqrt of a nan sum gives nan rather than failing
+nan = float("nan").unwrap()
+print(math.sqrt(nan * nan + 1.0))

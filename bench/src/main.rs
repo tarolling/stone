@@ -1,9 +1,10 @@
-//! Benchmarks stone's compiled output against C and Python.
+//! Benchmarks stone's compiled output against C, Rust, and Python.
 //!
 //! For example, `cargo run --release --manifest-path bench/Cargo.toml -- --runs 3 --filter fib`
-//! builds `bench/programs/fib.stn` with `stone build`, `fib.c` with `gcc -O2` and `gcc -O0`, checks
-//! that all of them and `python3 fib.py` print `fib.out`, then prints a table of their median
-//! times over three runs. Every version runs with the arguments in the benchmark's `.args` file,
+//! builds `bench/programs/fib.stn` with `stone build`, `fib.c` with `gcc -O2` and `gcc -O0`, and
+//! `fib.rs` (and a tuned `fib.fast.rs`, if there is one) with `rustc`, checks that all of them and
+//! `python3 fib.py` print `fib.out`, then prints a table of their median times over three runs.
+//! `--checks` also counts the checks the stone version still makes inside loops. Every version runs with the arguments in the benchmark's `.args` file,
 //! such as `fib.args`, if it has one. A benchmark with a numpy version, such as `vector.np.py`,
 //! also runs it with the `--numpy` interpreter when that can import numpy, and `--interpreter`
 //! also times each `.stn` under `stone run`.
@@ -13,18 +14,22 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{Duration, Instant};
 
-use stone_bench::{Implementation, Program, Row, discover, format_table, median, min};
+use stone_bench::{
+    Implementation, Program, RUSTC_FLAGS, Row, checks_in_loops, discover, format_table, median,
+    min,
+};
 
 const USAGE: &str = "\
 usage: stone-bench [--runs N] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min]
-                   [--interpreter]
+                   [--interpreter] [--checks]
 
   --runs N         timed runs of each implementation, after one untimed check (default 5)
   --filter NAME    only run benchmarks whose name contains NAME
   --stone PATH     use this stone binary instead of building target/release/stone
   --numpy PYTHON   run numpy versions with this Python, such as a virtualenv's (default python3)
   --min            report the fastest run instead of the median
-  --interpreter    also time each program under `stone run`, the interpreter";
+  --interpreter    also time each program under `stone run`, the interpreter
+  --checks         also count the checks each stone version still makes inside loops";
 
 /// A timing this short usually means gcc optimized the benchmark's work away.
 const SUSPICIOUSLY_FAST: Duration = Duration::from_millis(10);
@@ -37,6 +42,7 @@ struct Options {
     numpy: OsString,
     use_min: bool,
     interpreter: bool,
+    checks: bool,
 }
 
 /// Parses the arguments after the program name.
@@ -50,6 +56,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
         numpy: "python3".into(),
         use_min: false,
         interpreter: false,
+        checks: false,
     };
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -66,6 +73,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
             "--numpy" => options.numpy = value()?.into(),
             "--min" => options.use_min = true,
             "--interpreter" => options.interpreter = true,
+            "--checks" => options.checks = true,
             "-h" | "--help" => return Err(USAGE.into()),
             _ => return Err(format!("unknown argument {arg}\n{USAGE}")),
         }
@@ -93,6 +101,57 @@ fn run_command(argv: &[OsString]) -> Result<String, String> {
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Builds `program`'s Rust version from `source` (`rs` or `fast.rs`) into `out_dir` and returns
+/// the command that runs it with `args`.
+fn build_rust(
+    program: &Program,
+    source: &str,
+    args: &[String],
+    out_dir: &Path,
+) -> Result<Vec<OsString>, String> {
+    let suffix = if source == "rs" { "rs" } else { "rs-fast" };
+    let binary = out_dir.join(format!("{}-{suffix}", program.name));
+    // a file named `matmul.fast.rs` needs a crate name rustc accepts
+    let crate_name = format!("{}_{suffix}", program.name).replace('-', "_");
+    let mut build: Vec<OsString> = vec!["rustc".into()];
+    build.extend(RUSTC_FLAGS.iter().map(OsString::from));
+    build.extend([
+        "--crate-name".into(),
+        crate_name.into(),
+        program.file(source).into(),
+        "-o".into(),
+        binary.clone().into(),
+    ]);
+    run_command(&build)?;
+    let mut command: Vec<OsString> = vec![binary.into()];
+    command.extend(args.iter().map(OsString::from));
+    Ok(command)
+}
+
+/// Builds `program`'s stone version with `STONE_STATS` set and returns how many checks inside
+/// loops it still makes.
+fn count_checks(program: &Program, stone: &Path, out_dir: &Path) -> Result<usize, String> {
+    let binary = out_dir.join(format!("{}-stone-stats", program.name));
+    let output = Command::new(stone)
+        .arg("build")
+        .arg(program.file("stn"))
+        .arg("-o")
+        .arg(&binary)
+        .env("STONE_STATS", "1")
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", stone.display()))?;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    checks_in_loops(&stderr).ok_or(format!(
+        "{} printed no stats; is it older than STONE_STATS?\n{stderr}",
+        stone.display()
+    ))
+}
+
+/// Returns the summary of `samples` the options ask for: the fastest, or the median.
+fn summarize(samples: &[Duration], use_min: bool) -> Duration {
+    if use_min { min(samples) } else { median(samples) }
 }
 
 /// Builds the stone binary in release mode and returns its path.
@@ -225,6 +284,10 @@ fn run() -> Result<(), String> {
             })
             .is_ok();
 
+    let rustc = run_command(&["rustc".into(), "--version".into()])
+        .inspect_err(|_| eprintln!("warning: rustc was not found, so Rust versions are skipped"))
+        .is_ok();
+
     let mut rows = Vec::new();
     for program in &programs {
         let args = program.args()?;
@@ -283,11 +346,32 @@ fn run() -> Result<(), String> {
             }
             false => None,
         };
+        let mut rust = [None, None];
+        if rustc {
+            for (slot, source) in rust.iter_mut().zip(["rs", "fast.rs"]) {
+                if source == "fast.rs" && !program.has_fast_rust() {
+                    continue;
+                }
+                let label = if source == "rs" { "Rust" } else { "tuned Rust" };
+                let what = format!("{} under {label}", program.name);
+                eprintln!("running {what}");
+                let argv = build_rust(program, source, &args, &out_dir)?;
+                let samples = measure(&argv, options.runs, &expected, &what)?;
+                *slot = Some(summarize(&samples, options.use_min));
+            }
+        }
+        let checks = match options.checks {
+            true => Some(count_checks(program, &stone, &out_dir)?),
+            false => None,
+        };
         rows.push(Row {
             name: program.name.clone(),
             times,
             numpy,
             interpreter,
+            rust: rust[0],
+            rust_fast: rust[1],
+            checks,
         });
     }
 

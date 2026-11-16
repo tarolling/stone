@@ -23,6 +23,15 @@ a `build-x86_64-windows` pass builds every program as an `.exe` and runs it thro
 or `wine` when either is there, and otherwise only links it. A program that uses `net` or
 `os.run` is skipped for Windows. The macOS and Windows CI jobs run every program natively.
 
+A `build-verify` pass builds every program with `STONE_VERIFY_FACTS=1`, which keeps each check
+an optimization proved never fails and removed, as a check that stops the program with
+`compiler bug: <pass> removed a check that fails` if the proof was wrong. Without it, a wrong
+proof would read or write outside a list and could still print the right output, so this pass
+is what tests each proof against the interpreter. The differential fuzzer builds the same way.
+A pass that removes a check on a proof must leave an `Inst::Never` for it when
+`Options::verify` asks (`src/codegen/ir/opt.rs`), and `STONE_STATS=1 stone build` counts the
+checks that are left.
+
 `tests/assembler.rs` checks the built-in assembler and linker against GNU's. For every golden
 program and both processors, it assembles the backend's output with GNU as, links it with GNU
 ld at the addresses the built-in linker chose, and requires every section to hold the same

@@ -7,6 +7,7 @@ use crate::checker::{Analysis, Calls, TypeChecker};
 use crate::codegen::device::Device;
 use crate::codegen::gpu::compile::{CompileError, compile_cubin};
 use crate::codegen::gpu::{cubin, image, ptx};
+use crate::codegen::ir::opt::Options;
 use crate::codegen::{self, Os, Subsystem, Target};
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
@@ -403,8 +404,43 @@ pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
 /// For example, `compile_for("print(1)\n", Path::new("build/out"), Target::ARM64_LINUX)` writes
 /// arm64 assembly to `build/out.s` and links it into an arm64 Linux `build/out`.
 pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
+    compile_for_with(source, output, target, Options::from_env())
+}
+
+/// Compiles source code as [`compile_for`] does, optimizing as `options` asks.
+///
+/// For example, with `Options { verify: true }`, every check an optimizer pass proved never
+/// fails and removed still runs, and stops the program with `compiler bug` if it does fail.
+pub fn compile_for_with(
+    source: &str,
+    output: &Path,
+    target: Target,
+    options: Options,
+) -> Result<(), Box<dyn Error>> {
     let (sources, loaded) = load(Path::new(DEFAULT_ENTRY), source, &MapSources::default());
-    compile_module(&loaded?, &sources, output, target, Subsystem::Console, &[])
+    let checked = loaded?;
+    compile_with(
+        &checked,
+        &sources,
+        output,
+        Build {
+            target,
+            subsystem: Subsystem::Console,
+            devices: &[],
+            tests: None,
+            options,
+        },
+    )
+}
+
+/// How [`compile_with`] builds a checked module.
+struct Build<'a> {
+    target: Target,
+    subsystem: Subsystem,
+    devices: &'a [Device],
+    /// The test functions of a build for `stone test`, or `None` for a program.
+    tests: Option<Vec<String>>,
+    options: Options,
 }
 
 /// Compiles a checked module, such as one from [`load`], to a native executable for `target` at
@@ -421,7 +457,14 @@ pub fn compile_module(
     subsystem: Subsystem,
     devices: &[Device],
 ) -> Result<(), Box<dyn Error>> {
-    compile_with(checked, sources, output, target, subsystem, devices, None)
+    let build = Build {
+        target,
+        subsystem,
+        devices,
+        tests: None,
+        options: Options::from_env(),
+    };
+    compile_with(checked, sources, output, build)
 }
 
 /// Compiles a checked module, as [`compile_module`] does, into a build for `stone test`: an
@@ -438,28 +481,31 @@ pub fn compile_tests(
     target: Target,
 ) -> Result<(), Box<dyn Error>> {
     let tests = checked.tests.iter().map(|t| t.function.clone()).collect();
-    compile_with(
-        checked,
-        sources,
-        output,
+    let build = Build {
         target,
-        Subsystem::Console,
-        &[],
-        Some(tests),
-    )
+        subsystem: Subsystem::Console,
+        devices: &[],
+        tests: Some(tests),
+        options: Options::from_env(),
+    };
+    compile_with(checked, sources, output, build)
 }
 
-/// Compiles a checked module as [`compile_module`] does, into a build for `stone test` if
-/// `tests` lists its test functions.
+/// Compiles a checked module as [`compile_module`] does, as `build` says, into a build for
+/// `stone test` if it lists test functions.
 fn compile_with(
     checked: &Checked,
     sources: &SourceMap,
     output: &Path,
-    target: Target,
-    subsystem: Subsystem,
-    devices: &[Device],
-    tests: Option<Vec<String>>,
+    build: Build,
 ) -> Result<(), Box<dyn Error>> {
+    let Build {
+        target,
+        subsystem,
+        devices,
+        tests,
+        options,
+    } = build;
     let unsupported = unsupported(&checked.module, sources, target.os);
     if !unsupported.is_empty() {
         return Err(Box::new(Diagnostics(unsupported)));
@@ -480,6 +526,7 @@ fn compile_with(
     if let Some(tests) = tests {
         generator.set_tests(tests);
     }
+    generator.set_optimizer(options);
     let mut assembly = generator.assemble(&checked.module)?;
     if !devices.is_empty() {
         let numbered = codegen::gpu::numbered(generator.device_kernels())?;

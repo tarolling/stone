@@ -430,6 +430,10 @@ pub trait AssemblyGenerator {
     /// test functions, as `STONE_TEST` names it, and none of its top-level statements (see
     /// [`ir::lower::lower_with`]).
     fn set_tests(&mut self, tests: Vec<String>);
+
+    /// Sets what optimizing does beyond optimizing, as [`ir::opt::Options`] describes, such as
+    /// keeping each check a pass removed on a proof as a check that fails with `compiler bug`.
+    fn set_optimizer(&mut self, options: ir::opt::Options);
 }
 
 /// Returns the magic multiplier and shift that divide by the constant `divisor` with a

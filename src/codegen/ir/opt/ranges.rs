@@ -7,8 +7,8 @@
 //! a bound past a length still fails at the same index, after the same turns, as it would have.
 
 use super::{
-    BlockId, Function, Inst, Loop, Operand, Terminator, VReg, dominators, loops, never_negative,
-    place_before, predecessors,
+    BlockId, Function, Inst, Loop, Operand, Options, Terminator, VReg, dominators, insert_before,
+    loops, never_negative, never_outside, place_before, predecessors,
 };
 use crate::codegen::ir::inline::{rename_inst, retarget};
 use crate::codegen::ir::liveness::block_liveness;
@@ -19,8 +19,9 @@ use std::collections::{HashMap, HashSet};
 const MAX_COPIED_INSTS: usize = 64;
 
 /// Removes the index checks one loop's test proves, as the module describes, and returns whether
-/// it changed anything, so the caller runs it again until it does not.
-pub(super) fn remove_range_checks(function: &mut Function) -> bool {
+/// it changed anything, so the caller runs it again until it does not. With `options.verify`,
+/// each removed check stays as [`Inst::Never`]s.
+pub(super) fn remove_range_checks(function: &mut Function, options: Options) -> bool {
     let preds = predecessors(function);
     let idom = dominators(function, &preds);
     let dominates = |a: usize, mut b: usize| loop {
@@ -71,8 +72,12 @@ pub(super) fn remove_range_checks(function: &mut Function) -> bool {
         let (by_length, by_bound): (Vec<Candidate>, Vec<Candidate>) =
             candidates.into_iter().partition(|c| Some(c.list) == length);
         if !by_length.is_empty() {
-            for c in &by_length {
-                uncheck(&mut function.blocks[c.block].insts[c.index]);
+            let mut at: Vec<(usize, usize)> =
+                by_length.iter().map(|c| (c.block, c.index)).collect();
+            // later ones first, so that what verifying puts before one leaves the rest in place
+            at.sort_unstable_by(|a, b| b.cmp(a));
+            for (block, index) in at {
+                uncheck_at(function, block, index, options);
             }
             return true;
         }
@@ -93,7 +98,7 @@ pub(super) fn remove_range_checks(function: &mut Function) -> bool {
         if every_turn.is_empty() || !small || !innermost {
             continue;
         }
-        version(function, &l, preheader, &test, &every_turn);
+        version(function, &l, preheader, &test, &every_turn, options);
         return true;
     }
     false
@@ -257,6 +262,20 @@ fn bound_length(function: &Function, preheader: usize, test: &Test, l: &Loop) ->
     Some(list)
 }
 
+/// Turns the checked read or store at `index` of `block` into one of a slot known to be in range,
+/// putting [`Inst::Never`]s for the check before it when `options.verify`.
+fn uncheck_at(function: &mut Function, block: usize, index: usize, options: Options) {
+    let (list, at) = match function.blocks[block].insts[index] {
+        Inst::ListLoad { list, index, .. } | Inst::ListStore { list, index, .. } => (list, index),
+        _ => return,
+    };
+    uncheck(&mut function.blocks[block].insts[index]);
+    if options.verify {
+        let checks = never_outside(function, list, at, 1, "ranges");
+        insert_before(&mut function.blocks[block], index, checks);
+    }
+}
+
 /// Turns a checked read or store into one of a slot known to be in range.
 fn uncheck(inst: &mut Inst) {
     *inst = match *inst {
@@ -294,6 +313,7 @@ fn version(
     preheader: usize,
     test: &Test,
     candidates: &[Candidate],
+    options: Options,
 ) {
     let blocks: Vec<usize> = l.blocks().collect();
     // what the loop writes and nothing reads before writing it in the same turn or after it
@@ -368,11 +388,16 @@ fn version(
         imm => imm,
     };
     for &b in &blocks {
-        let mut block = function.blocks[b].clone();
-        for (i, inst) in block.insts.iter_mut().enumerate() {
+        let copy = function.blocks.len();
+        function.blocks.push(function.blocks[b].clone());
+        // later ones first, so that what verifying puts before one leaves the rest in place
+        for i in (0..function.blocks[copy].insts.len()).rev() {
             if unchecked.contains(&(b, i)) {
-                uncheck(inst);
+                uncheck_at(function, copy, i, options);
             }
+        }
+        let mut block = function.blocks.pop().expect("the copy was just pushed");
+        for inst in block.insts.iter_mut() {
             *inst = rename_inst(inst, &reg, &operand);
         }
         block.term = retarget(

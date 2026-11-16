@@ -8,7 +8,8 @@ use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
 use crate::checker::{Analysis, Structs, Type, TypeChecker, variants};
 use crate::codegen::ir::inline::inline;
 use crate::codegen::ir::lower::{TABLE_ENTRY, lower_with};
-use crate::codegen::ir::opt::optimize;
+use crate::codegen::ir::opt::{Options, optimize_with};
+use crate::codegen::ir::stats;
 use crate::codegen::ir::trig;
 use crate::codegen::ir::{Callee, Inst, Program};
 use crate::codegen::{Architecture, AssemblyGenerator, Os, Target};
@@ -597,6 +598,8 @@ pub struct Context {
     /// The linked names of the test functions a build for `stone test` runs, one per run, or
     /// `None` for an ordinary build.
     pub tests: Option<Vec<String>>,
+    /// What optimizing does beyond optimizing, such as keeping removed checks to verify them.
+    pub optimizer: Options,
 }
 
 impl Context {
@@ -631,7 +634,12 @@ impl Context {
             trig::expand(function);
         }
         inline(&mut self.program);
-        optimize(&mut self.program);
+        optimize_with(&mut self.program, self.optimizer);
+        if stats::enabled() {
+            for line in stats::report(&self.program) {
+                eprintln!("{line}");
+            }
+        }
         let insts = self
             .program
             .functions

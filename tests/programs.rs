@@ -93,6 +93,10 @@ enum Backend {
     /// `stone build --gpu sm_75` for the host, whose arithmetic on lists first tries to launch a
     /// kernel and, finding no GPU to launch it on, computes on the processor.
     Gpu,
+    /// `stone build` for the host with `STONE_VERIFY_FACTS` set, so every check an optimizer
+    /// pass removed on a proof is still made, and fails with `compiler bug` if the proof was
+    /// wrong.
+    Verify,
 }
 
 /// A target level the golden programs are built for, and how its programs run.
@@ -131,6 +135,7 @@ impl Backend {
             }) => "build-x86_64v4",
             Backend::Level(_) => "build-aarch64v9",
             Backend::Gpu => "build-gpu",
+            Backend::Verify => "build-verify",
         }
     }
 }
@@ -393,10 +398,13 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
         | Backend::Cross(_)
         | Backend::Windows(_)
         | Backend::Level(_)
-        | Backend::Gpu => {
+        | Backend::Gpu
+        | Backend::Verify => {
             let suffix = match backend {
                 Backend::Windows(_) => ".exe",
-                Backend::Build | Backend::Level(_) | Backend::Gpu => std::env::consts::EXE_SUFFIX,
+                Backend::Build | Backend::Level(_) | Backend::Gpu | Backend::Verify => {
+                    std::env::consts::EXE_SUFFIX
+                }
                 _ => "",
             };
             let exe = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -413,6 +421,9 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 }
                 Backend::Gpu => {
                     build.args(["--gpu", "sm_75"]);
+                }
+                Backend::Verify => {
+                    build.env("STONE_VERIFY_FACTS", "1");
                 }
                 Backend::Level(level) => {
                     let system = if cfg!(windows) { "windows" } else { "linux" };
@@ -597,6 +608,14 @@ fn interpreter_matches_expected() {
 #[test]
 fn compiler_matches_expected() {
     check_all(Backend::Build);
+}
+
+/// Builds every program keeping each check an optimizer pass proved never fails, as a failure
+/// that says the compiler has a bug, so each proof the programs exercise is tested against the
+/// interpreter's output.
+#[test]
+fn verified_compiler_matches_expected() {
+    check_all(Backend::Verify);
 }
 
 #[test]

@@ -54,10 +54,17 @@
 //! adjustment for counting from the end.
 //!
 //! The IR is not SSA, so every fact is about vregs and dies when any vreg it names is written.
+//!
+//! A pass that removes a check because it proved the check never fails, rather than because the
+//! same check already ran, leaves an [`Inst::Never`] in its place when [`Options::verify`] asks
+//! (`STONE_VERIFY_FACTS`), and [`expand_never`] turns each into a comparison and a branch to a
+//! `compiler bug` failure once every pass has run. The optimized code keeps its shape, so the
+//! golden programs and the fuzzer, built that way, test each proof against the interpreter.
 
 mod cfg;
 mod counters;
 mod dead;
+mod facts;
 mod fold;
 mod licm;
 mod ranges;
@@ -68,8 +75,32 @@ use super::{
 };
 use std::collections::{HashMap, HashSet};
 
+/// What [`optimize_with`] does beyond optimizing.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Options {
+    /// Whether every check a pass removes on a proof stays as an [`Inst::Never`], which
+    /// [`expand_never`] then turns into a check that fails with `compiler bug`, as a build with
+    /// `STONE_VERIFY_FACTS` set asks.
+    pub verify: bool,
+}
+
+impl Options {
+    /// Returns the options the environment asks for: `verify` when `STONE_VERIFY_FACTS` is set to
+    /// anything but `0`.
+    pub fn from_env() -> Options {
+        Options {
+            verify: std::env::var_os("STONE_VERIFY_FACTS").is_some_and(|v| v != "0"),
+        }
+    }
+}
+
 /// Runs every optimization over each function of `program`.
 pub fn optimize(program: &mut Program) {
+    optimize_with(program, Options::default());
+}
+
+/// Runs every optimization over each function of `program`, as `options` asks.
+pub fn optimize_with(program: &mut Program, options: Options) {
     for function in &mut program.functions {
         while forward_copies(function) {}
         while fold::fold_constants(function) | cfg::simplify_cfg(function) {}
@@ -86,11 +117,176 @@ pub fn optimize(program: &mut Program) {
             | dead::remove_dead_loops(function)
             | cfg::simplify_cfg(function)
         {}
-        while ranges::remove_range_checks(function) {}
+        if facts::remove_proven_checks(function, options) {
+            while cfg::simplify_cfg(function) | dead::remove_dead(function) {}
+        }
+        while ranges::remove_range_checks(function, options) {}
         while counters::coalesce_counters(function) {}
         rotate_loops(function);
         hoist_data(function);
+        if options.verify {
+            never_counted_from_end(function);
+            expand_never(function);
+        }
     }
+}
+
+/// Puts `insts` before instruction `at` of `block`, from where that instruction came from.
+pub(super) fn insert_before(block: &mut Block, at: usize, insts: Vec<Inst>) {
+    let span = block.spans[at];
+    let count = insts.len();
+    block.insts.splice(at..at, insts);
+    block.spans.splice(at..at, std::iter::repeat_n(span, count));
+}
+
+/// Returns what stands, in a build that verifies facts, for the check that `index` is an element
+/// of `list`, whose elements are `width` slots each, from 0 to below their number, which the pass
+/// `what` proved and removed: the number of elements read into new vregs, then a
+/// [`Inst::Never`] for each way out of range.
+///
+/// For example, for `list_load v0, v3` (`width` 1) it is `v9 = list_len v0`,
+/// `never_lt v3, 0 "ranges"`, and `never_ge v3, v9 "ranges"`.
+pub(super) fn never_outside(
+    function: &mut Function,
+    list: Operand,
+    index: Operand,
+    width: usize,
+    what: &'static str,
+) -> Vec<Inst> {
+    let slots = VReg(function.vreg_count);
+    function.vreg_count += 1;
+    let mut insts = vec![Inst::ListLen { dst: slots, list }];
+    let mut length = slots;
+    if width > 1 {
+        length = VReg(function.vreg_count);
+        function.vreg_count += 1;
+        insts.push(Inst::Binary {
+            op: BinOp::Div,
+            dst: length,
+            lhs: Operand::Reg(slots),
+            rhs: Operand::Imm(width as i64),
+        });
+    }
+    let never = |cond, rhs| Inst::Never {
+        cond,
+        float: false,
+        lhs: index,
+        rhs,
+        what,
+    };
+    insts.push(never(Cond::Lt, Operand::Imm(0)));
+    insts.push(never(Cond::Ge, Operand::Reg(length)));
+    insts
+}
+
+/// Puts an [`Inst::Never`] that the index is negative before every checked access by an index
+/// [`never_negative`] finds, since the backends then skip counting it from the end.
+fn never_counted_from_end(function: &mut Function) {
+    let natural = never_negative(function);
+    for block in &mut function.blocks {
+        let mut at = 0;
+        while at < block.insts.len() {
+            let index = match block.insts[at] {
+                Inst::ListLoad { index, .. }
+                | Inst::ListStore { index, .. }
+                | Inst::ElementSlot { index, .. } => index,
+                _ => {
+                    at += 1;
+                    continue;
+                }
+            };
+            if matches!(index, Operand::Reg(reg) if natural.contains(&reg)) {
+                let never = Inst::Never {
+                    cond: Cond::Lt,
+                    float: false,
+                    lhs: index,
+                    rhs: Operand::Imm(0),
+                    what: "never_negative",
+                };
+                insert_before(block, at, vec![never]);
+                at += 1;
+            }
+            at += 1;
+        }
+    }
+}
+
+/// Turns each [`Inst::Never`] into what it stands for: the block ends at it with a comparison
+/// that goes on to a new block holding the rest, or, when the comparison holds, to a block that
+/// stops the program with `compiler bug: <pass> removed a check that fails`. The failures go at
+/// the end, since they read no vregs.
+pub fn expand_never(function: &mut Function) {
+    let nevers = |block: &Block| {
+        block
+            .insts
+            .iter()
+            .filter(|inst| matches!(inst, Inst::Never { .. }))
+            .count()
+    };
+    if function.blocks.iter().all(|block| nevers(block) == 0) {
+        return;
+    }
+    let old = std::mem::take(&mut function.blocks);
+    // where each block starts once the blocks before it are split
+    let mut first = Vec::with_capacity(old.len());
+    let mut count = 0;
+    for block in &old {
+        first.push(count);
+        count += 1 + nevers(block);
+    }
+    let mut failures = Vec::new();
+    for block in old {
+        let mut insts = Vec::new();
+        let mut spans = Vec::new();
+        for (inst, span) in block.insts.into_iter().zip(block.spans) {
+            let Inst::Never {
+                cond,
+                float,
+                lhs,
+                rhs,
+                what,
+            } = inst
+            else {
+                insts.push(inst);
+                spans.push(span);
+                continue;
+            };
+            let rest = BlockId(function.blocks.len() + 1);
+            let failure = BlockId(count + failures.len());
+            failures.push(Block {
+                insts: vec![],
+                spans: vec![],
+                term: Terminator::Fail(
+                    format!("compiler bug: {what} removed a check that fails"),
+                    vec![],
+                ),
+                term_span: span,
+                loop_depth: block.loop_depth,
+            });
+            function.blocks.push(Block {
+                insts: std::mem::take(&mut insts),
+                spans: std::mem::take(&mut spans),
+                term: Terminator::CmpBranch {
+                    cond,
+                    float,
+                    lhs,
+                    rhs,
+                    then: failure,
+                    otherwise: rest,
+                },
+                term_span: span,
+                loop_depth: block.loop_depth,
+            });
+        }
+        function.blocks.push(Block {
+            insts,
+            spans,
+            term: retarget(&block.term, |BlockId(b)| BlockId(first[b]), |o| o),
+            term_span: block.term_span,
+            loop_depth: block.loop_depth,
+        });
+    }
+    function.blocks.extend(failures);
 }
 
 /// Something known to hold at a point of a function.
@@ -1435,6 +1631,11 @@ mod tests {
 
     /// Parses, checks, lowers, and optimizes `source`, returning the function named `name`.
     fn optimized(source: &str, name: &str) -> Function {
+        optimized_with(source, name, Options::default())
+    }
+
+    /// Does what [`optimized`] does, optimizing as `options` asks.
+    fn optimized_with(source: &str, name: &str, options: Options) -> Function {
         let module = parse_program(source).unwrap();
         let analysis = TypeChecker::new().analyze(&module);
         assert!(
@@ -1443,7 +1644,7 @@ mod tests {
             analysis.diagnostics
         );
         let mut program = lower(&module, &analysis).unwrap();
-        optimize(&mut program);
+        optimize_with(&mut program, options);
         program
             .functions
             .into_iter()
@@ -1658,6 +1859,98 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Returns the messages of every `fail` that ends a block of `function`.
+    fn failures(function: &Function) -> Vec<String> {
+        function
+            .blocks
+            .iter()
+            .filter_map(|block| match &block.term {
+                Terminator::Fail(message, _) => Some(message.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn verifying_keeps_each_check_a_proof_removed_as_a_compiler_bug() {
+        let source = "fn f(xs: list[int], n: int) -> int:\n    t = 0\n    \
+                      for i in range(xs.len()):\n        t += xs[i]\n    \
+                      for j in range(n):\n        t += xs[j]\n    ret t\n";
+        let plain = optimized(source, "f");
+        let verified = optimized_with(source, "f", Options { verify: true });
+        let bug = |f: &Function| {
+            failures(f)
+                .iter()
+                .filter(|m| m.starts_with("compiler bug: "))
+                .count()
+        };
+        assert_eq!(bug(&plain), 0, "{plain}");
+        // the first loop's read, and the read in the second loop's unchecked copy, each below 0
+        // and past the length, plus the copy's index never counted from the end
+        assert!(bug(&verified) >= 4, "{verified}");
+        assert!(
+            failures(&verified).contains(&"compiler bug: ranges removed a check that fails".into()),
+            "{verified}"
+        );
+        let unchecked = |f: &Function| count(f, |inst| matches!(inst, Inst::ListGet { .. }));
+        assert_eq!(unchecked(&plain), unchecked(&verified), "{verified}");
+        let never = count(&verified, |inst| matches!(inst, Inst::Never { .. }));
+        assert_eq!(never, (0, 0), "{verified}");
+    }
+
+    #[test]
+    fn expanding_a_never_splits_its_block_and_keeps_the_ways_out() {
+        let mut f = optimized(
+            "fn f(xs: list[int], i: int) -> int:\n    if i > 0:\n        ret xs[i]\n    ret 0\n",
+            "f",
+        );
+        let before = f.blocks.len();
+        let at = f
+            .blocks
+            .iter()
+            .position(|b| {
+                b.insts
+                    .iter()
+                    .any(|inst| matches!(inst, Inst::ListLoad { .. }))
+            })
+            .unwrap();
+        let never = Inst::Never {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(f.params[1]),
+            rhs: Operand::Imm(7),
+            what: "test",
+        };
+        insert_before(&mut f.blocks[at], 0, vec![never]);
+        expand_never(&mut f);
+        assert_eq!(f.blocks.len(), before + 2, "{f}");
+        let Terminator::CmpBranch {
+            cond: Cond::Eq,
+            then,
+            otherwise,
+            ..
+        } = f.blocks[at].term
+        else {
+            panic!("{f}");
+        };
+        assert_eq!(otherwise, BlockId(at + 1), "{f}");
+        assert_eq!(
+            f.blocks[then.0].term,
+            Terminator::Fail(
+                "compiler bug: test removed a check that fails".into(),
+                vec![]
+            ),
+            "{f}"
+        );
+        assert!(
+            f.blocks[at + 1]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, Inst::ListLoad { .. })),
+            "{f}"
+        );
     }
 
     #[test]

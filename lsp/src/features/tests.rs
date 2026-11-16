@@ -761,6 +761,8 @@ fn completion_after_a_dot_offers_methods() {
         "clamp",
         "abs",
         "floor",
+        "trailing_zeros",
+        "leading_zeros",
         "display",
         "send",
         "read_line",
@@ -771,6 +773,9 @@ fn completion_after_a_dot_offers_methods() {
         "close",
         "bytes",
         "text",
+        "u16_le",
+        "u32_le",
+        "u64_le",
         "set_timeout",
         "send_bytes",
         "read_bytes",
@@ -870,7 +875,16 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
     assert_eq!(
         labels(at(10, 3)),
         [
-            "eq", "cmp", "min", "max", "clamp", "abs", "floor", "display"
+            "eq",
+            "cmp",
+            "min",
+            "max",
+            "clamp",
+            "abs",
+            "floor",
+            "trailing_zeros",
+            "leading_zeros",
+            "display"
         ]
     );
     assert_eq!(
@@ -2057,7 +2071,8 @@ fn completion_after_bytes_offers_their_methods() {
     assert_eq!(
         labels(at(2, 10)),
         [
-            "len", "contains", "eq", "cmp", "min", "max", "clamp", "display", "text"
+            "len", "contains", "eq", "cmp", "min", "max", "clamp", "display", "text", "u16_le",
+            "u32_le", "u64_le"
         ]
     );
     assert!(labels(at(3, 7)).contains(&"bytes".to_string()));

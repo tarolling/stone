@@ -1170,11 +1170,16 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
             let word = rd.sf() << 31 | 0x5a800400 | rn.num << 16 | cond << 12;
             Ok((word | rn.num << 5 | rd.num, None))
         }
-        "clz" => {
+        "clz" | "rbit" => {
             count(2)?;
             let (rd, rn) = (gpr(operands[0])?, gpr(operands[1])?);
             same_width(&[rd, rn])?;
-            Ok((rd.sf() << 31 | 0x5ac01000 | rn.num << 5 | rd.num, None))
+            let opcode = if mnemonic == "clz" {
+                0x5ac01000
+            } else {
+                0x5ac00000
+            };
+            Ok((rd.sf() << 31 | opcode | rn.num << 5 | rd.num, None))
         }
         "ldr" | "str" | "ldur" | "stur" | "ldrb" | "strb" | "ldrh" | "strh" | "ldrsw" => {
             let (rt, mem, post) = match operands {
@@ -1484,6 +1489,8 @@ mod tests {
             ("lsr x0, x1, x2", "9ac22420"),
             ("ubfx x0, x1, #52, #11", "d374f820"),
             ("clz x0, x1", "dac01020"),
+            ("rbit x0, x1", "dac00020"),
+            ("rbit x9, x9", "dac00129"),
             ("csel x0, x1, x2, ne", "9a821020"),
             ("csel x0, x1, xzr, gt", "9a9fc020"),
             ("cset x0, eq", "9a9f17e0"),

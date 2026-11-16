@@ -94,6 +94,16 @@ fn low_half(reg: &str) -> &'static str {
     XMM[reg[3..].parse::<usize>().unwrap_or_default()]
 }
 
+/// Returns the 32-bit name of the general register `reg`, such as `ebx` for `rbx` or `r12d` for
+/// `r12`, whose writes clear the upper half.
+fn dword_reg(reg: &str) -> String {
+    if reg[1..].starts_with(|c: char| c.is_ascii_digit()) {
+        format!("{reg}d")
+    } else {
+        format!("e{}", &reg[1..])
+    }
+}
+
 /// The vector instructions a packed loop uses, the widest the target's level allows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Vectors {
@@ -1393,6 +1403,26 @@ impl X64Generator {
                 self.store(dst, "rax");
             }
 
+            Inst::BitCount { dst, src, leading } => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                self.load("rax", src);
+                if super::bmi(self.target.level) {
+                    let op = if *leading { "lzcnt" } else { "tzcnt" };
+                    self.emit(&format!("\t{op}\trax, rax"));
+                } else if *leading {
+                    // bsr gives the highest bit's number, so 63 minus it, and 127 ^ 63 for 0
+                    self.emit("\tbsr\trax, rax");
+                    self.emit("\tmov\tecx, 127");
+                    self.emit("\tcmove\trax, rcx");
+                    self.emit("\txor\trax, 63");
+                } else {
+                    self.emit("\tbsf\trax, rax");
+                    self.emit("\tmov\tecx, 64");
+                    self.emit("\tcmove\trax, rcx");
+                }
+                self.store(dst, "rax");
+            }
+
             Inst::Compare {
                 cond,
                 float,
@@ -1527,7 +1557,12 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
-            Inst::StrByte { dst, text, index } => {
+            Inst::StrByte {
+                dst,
+                text,
+                index,
+                width,
+            } => {
                 let (dst, text, index) =
                     (frame.reg(*dst)?, frame.value(*text)?, frame.value(*index)?);
                 let base = self.base(text, "rax");
@@ -1540,7 +1575,13 @@ impl X64Generator {
                     }
                 };
                 let target = self.target(dst, None);
-                self.emit(&format!("\tmovzx\t{target}, byte ptr {byte}"));
+                match width {
+                    1 => self.emit(&format!("\tmovzx\t{target}, byte ptr {byte}")),
+                    2 => self.emit(&format!("\tmovzx\t{target}, word ptr {byte}")),
+                    // a 32-bit load clears the upper half
+                    4 => self.emit(&format!("\tmov\t{}, DWORD PTR {byte}", dword_reg(target))),
+                    _ => self.emit(&format!("\tmov\t{target}, QWORD PTR {byte}")),
+                }
                 self.store(dst, target);
             }
 

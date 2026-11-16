@@ -424,6 +424,13 @@ pub enum Inst {
     },
     /// 1 if `src` is zero, else 0.
     Not { dst: VReg, src: Operand },
+    /// How many of the 64 bits of `src` are 0 above its highest 1 bit (`leading`) or below its
+    /// lowest one, 64 for 0.
+    BitCount {
+        dst: VReg,
+        src: Operand,
+        leading: bool,
+    },
     /// 1 if the comparison holds, else 0. Ints compare signed, and floats compare with every
     /// ordered comparison involving nan false.
     Compare {
@@ -449,12 +456,14 @@ pub enum Inst {
     ListLen { dst: VReg, list: Operand },
     /// The length in bytes of a string or bytes value, from its header, as in `v1 = str_len v0`.
     StrLen { dst: VReg, text: Operand },
-    /// The byte at `index` of a string, which must be in range, as an int from 0 to 255, as in
-    /// `v2 = str_byte v0, v1`.
+    /// The `width` bytes (1, 2, 4, or 8) from `index` on of a string or bytes, which must all be
+    /// in range, as a little-endian int, one byte reading from 0 to 255 and eight wrapping, as
+    /// in `v2 = str_byte v0, v1` or `v3 = bytes_load4 v0, v1`.
     StrByte {
         dst: VReg,
         text: Operand,
         index: Operand,
+        width: u8,
     },
     /// `dst = list[index]`, counting a negative index from the end and failing when out of range.
     ListLoad {
@@ -657,6 +666,7 @@ impl Inst {
             | Inst::FloatAbs { dst, .. }
             | Inst::FloatSqrt { dst, .. }
             | Inst::Not { dst, .. }
+            | Inst::BitCount { dst, .. }
             | Inst::Compare { dst, .. }
             | Inst::LoadGlobal { dst, .. }
             | Inst::StrAddr { dst, .. }
@@ -709,6 +719,7 @@ impl Inst {
             | Inst::ReducePio2 { src, .. }
             | Inst::SinCos { src, .. }
             | Inst::Not { src, .. }
+            | Inst::BitCount { src, .. }
             | Inst::IntToFloat { src, .. }
             | Inst::FloatToInt { src, .. }
             | Inst::StoreGlobal { src, .. }
@@ -1124,6 +1135,14 @@ impl fmt::Display for Inst {
             }
             Inst::SinCos { sin, cos, src } => write!(f, "{sin}, {cos} = sincos {src}"),
             Inst::Not { dst, src } => write!(f, "{dst} = not {src}"),
+            Inst::BitCount { dst, src, leading } => {
+                let op = if *leading {
+                    "leading_zeros"
+                } else {
+                    "trailing_zeros"
+                };
+                write!(f, "{dst} = {op} {src}")
+            }
             Inst::Compare {
                 cond,
                 float,
@@ -1148,7 +1167,18 @@ impl fmt::Display for Inst {
                 write!(f, "{dst} = min_row_len {list}, {count}")
             }
             Inst::StrLen { dst, text } => write!(f, "{dst} = str_len {text}"),
-            Inst::StrByte { dst, text, index } => write!(f, "{dst} = str_byte {text}, {index}"),
+            Inst::StrByte {
+                dst,
+                text,
+                index,
+                width: 1,
+            } => write!(f, "{dst} = str_byte {text}, {index}"),
+            Inst::StrByte {
+                dst,
+                text,
+                index,
+                width,
+            } => write!(f, "{dst} = bytes_load{width} {text}, {index}"),
             Inst::ListLoad { dst, list, index } => {
                 write!(f, "{dst} = list_load {list}, {index}")
             }

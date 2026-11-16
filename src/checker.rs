@@ -9780,6 +9780,13 @@ impl Inference {
                     _ => Ty::Int,
                 }
             }
+            "trailing_zeros" | "leading_zeros" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                self.expect(&Ty::Int, &receiver_ty, receiver.span);
+                Ty::Int
+            }
             "eq" => {
                 if args.len() != 1 {
                     self.arity_error(call.span, name, "1", args.len());
@@ -9833,6 +9840,14 @@ impl Inference {
                     "err" => Ty::Enum(OPTION.to_string(), vec![error]),
                     _ => value,
                 }
+            }
+            "u16_le" | "u32_le" | "u64_le" => {
+                self.expect(&Ty::Bytes, &receiver_ty, receiver.span);
+                match args {
+                    [index] => self.expect(&Ty::Int, &arg_types[0], index.span),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                Ty::Int
             }
             "bytes" | "text" => {
                 if !args.is_empty() {
@@ -10063,6 +10078,13 @@ impl Inference {
                     _ => self.arity_error(call.span, name, "0 or 1", args.len()),
                 }
                 Ty::Enum(RESULT.to_string(), vec![Ty::Str, Ty::Str])
+            }
+            "byte" => {
+                match args {
+                    [value] => self.expect(&Ty::Int, &arg_types[0], value.span),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                Ty::Bytes
             }
             "eof" | "args" => {
                 if !args.is_empty() {

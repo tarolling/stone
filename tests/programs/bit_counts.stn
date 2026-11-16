@@ -1,0 +1,19 @@
+// trailing and leading zero bits of 64-bit ints, 64 for 0
+fn show(n: int):
+    print("{n}: {n.trailing_zeros()} {n.leading_zeros()}")
+
+for n in [0, 1, 2, 3, 8, 12, 255, 256, 1 << 40, -1, -2, -9223372036854775807 - 1, 9223372036854775807]:
+    show(n)
+
+// counted at compile time
+print(40.trailing_zeros(), 40.leading_zeros(), 0.trailing_zeros(), (-1).leading_zeros())
+
+// the first differing byte of two 8-byte words
+a = b"abcdefgh"
+b = b"abcdXfgh"
+print((a.u64_le(0) ^ b.u64_le(0)).trailing_zeros() / 8)
+
+total = 0
+for i in range(1, 1000):
+    total += i.trailing_zeros() + i.leading_zeros()
+print(total)

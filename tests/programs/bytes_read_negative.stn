@@ -1,0 +1,4 @@
+// a read never counts from the end, so a negative index stops the program
+data = b"\x01\x02"
+n = -1
+print(data.u16_le(n))

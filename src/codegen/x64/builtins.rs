@@ -25,23 +25,50 @@ pub fn shift_by_cl(r#gen: &mut dyn AssemblyGenerator, op: &str, reg: &str) {
     }
 }
 
-/// Emits a copy of `rcx` bytes from `rsi` to `rdi` that leaves them past the bytes and `rcx` at
-/// 0, as `rep movsb` does, but copies up to 32 bytes one `movsb` at a time, since `rep movsb`
-/// takes tens of cycles to start, longer than a short string takes to copy. `label` starts the
-/// names of its labels.
+/// Emits a copy of `rcx` bytes from `rsi` to `rdi`, which must not overlap, that leaves them past
+/// the bytes and `rcx` at 0, as `rep movsb` does, and clobbers `rdx`. Since `rep movsb` takes tens
+/// of cycles to start, longer than a short string takes to copy, up to 32 bytes go 8 at a time
+/// with a last 8 that may overlap those before it, or two 4-byte moves for 4 to 7, or bytes for
+/// fewer. `label` starts the names of its labels.
 ///
 /// For example, `copy_bytes(r#gen, ".Lstr_slice_bytes")` emits the labels
-/// `.Lstr_slice_bytes_byte`, `.Lstr_slice_bytes_long`, and `.Lstr_slice_bytes_done`.
+/// `.Lstr_slice_bytes_word`, `.Lstr_slice_bytes_long`, and `.Lstr_slice_bytes_done`, among
+/// others, and copies 13 bytes as the 8 at offset 0 and then the 8 at offset 5.
 pub fn copy_bytes(r#gen: &mut dyn AssemblyGenerator, label: &str) {
     r#gen.emit("\tcmp\trcx, 32");
     r#gen.emit(&format!("\tja\t{label}_long"));
+    r#gen.emit("\tcmp\trcx, 8");
+    r#gen.emit(&format!("\tjb\t{label}_short"));
+    r#gen.emit(&format!("{label}_word:"));
+    r#gen.emit("\tmov\trdx, QWORD PTR [rsi]");
+    r#gen.emit("\tmov\tQWORD PTR [rdi], rdx");
+    r#gen.emit("\tadd\trsi, 8");
+    r#gen.emit("\tadd\trdi, 8");
+    r#gen.emit("\tsub\trcx, 8");
+    r#gen.emit("\tcmp\trcx, 8");
+    r#gen.emit(&format!("\tjae\t{label}_word"));
+    // the last 8 bytes, some of which may be copied again
+    r#gen.emit("\tmov\trdx, QWORD PTR [rsi + rcx - 8]");
+    r#gen.emit("\tmov\tQWORD PTR [rdi + rcx - 8], rdx");
+    r#gen.emit(&format!("\tjmp\t{label}_tail"));
+    r#gen.emit(&format!("{label}_short:"));
+    r#gen.emit("\tcmp\trcx, 4");
+    r#gen.emit(&format!("\tjb\t{label}_byte"));
+    r#gen.emit("\tmov\tedx, DWORD PTR [rsi]");
+    r#gen.emit("\tmov\tDWORD PTR [rdi], edx");
+    r#gen.emit("\tmov\tedx, DWORD PTR [rsi + rcx - 4]");
+    r#gen.emit("\tmov\tDWORD PTR [rdi + rcx - 4], edx");
+    r#gen.emit(&format!("{label}_tail:"));
+    r#gen.emit("\tadd\trsi, rcx");
+    r#gen.emit("\tadd\trdi, rcx");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(&format!("\tjmp\t{label}_done"));
+    r#gen.emit(&format!("{label}_byte:"));
     r#gen.emit("\ttest\trcx, rcx");
     r#gen.emit(&format!("\tjz\t{label}_done"));
-    r#gen.emit(&format!("{label}_byte:"));
     r#gen.emit("\tmovsb");
     r#gen.emit("\tdec\trcx");
-    r#gen.emit(&format!("\tjnz\t{label}_byte"));
-    r#gen.emit(&format!("\tjmp\t{label}_done"));
+    r#gen.emit(&format!("\tjmp\t{label}_byte"));
     r#gen.emit(&format!("{label}_long:"));
     r#gen.emit("\trep\tmovsb");
     r#gen.emit(&format!("{label}_done:"));
@@ -2243,6 +2270,10 @@ pub(super) fn slice_bounds(r#gen: &mut dyn AssemblyGenerator, routine: &str) {
     r#gen.emit("\txor\tr14d, r14d");
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjle\t{}", label("counted")));
+    // a step of 1 either way covers the distance, with no division
+    r#gen.emit("\tmov\tr14, rax");
+    r#gen.emit("\tcmp\trcx, 1");
+    r#gen.emit(&format!("\tje\t{}", label("counted")));
     r#gen.emit("\tdec\trax");
     r#gen.emit("\txor\tedx, edx");
     r#gen.emit("\tdiv\trcx");
@@ -3126,8 +3157,13 @@ pub fn string_methods(
         r#gen.emit("\tpop\trbp");
         r#gen.emit("\tret");
     }
-    if uses("stone.str_at") || uses("stone.str_char") {
-        byte_strings(r#gen);
+    if uses("stone.str_at") || uses("stone.str_char") || uses("stone.byte_value") {
+        byte_strings(r#gen, uses("stone.byte_value"));
+    }
+    if uses("stone.byte_value") {
+        r#gen.emit("stone.byte_value:");
+        r#gen.emit("\tmov\teax, edi");
+        byte_string(r#gen);
     }
     if uses("stone.str_at") {
         r#gen.emit("stone.str_at:");
@@ -3518,15 +3554,16 @@ fn str_replace(r#gen: &mut dyn AssemblyGenerator) {
 }
 
 /// Emits the table of the 128 one-byte strings that `stone.str_at` and `stone.str_char` (see
-/// [`string_methods`]) return for an ASCII byte, so neither allocates for one. Each entry is 32
-/// bytes: a length of 1, an immortal reference count, then the byte and its terminator as one
-/// little-endian quad, and a quad of padding, so entry `b` starts at `32 * b` and its string 16
-/// bytes later. Entry 0 would be a null byte, which neither returns, since no string holds one.
-fn byte_strings(r#gen: &mut dyn AssemblyGenerator) {
+/// [`string_methods`]) return for an ASCII byte, so neither allocates for one, or of all 256 when
+/// `stone.byte_value` returns them as `bytes` too. Each entry is 32 bytes: a length of 1, an
+/// immortal reference count, then the byte and its terminator as one little-endian quad, and a
+/// quad of padding, so entry `b` starts at `32 * b` and its string 16 bytes later. Entry 0 is a
+/// null byte, which only `stone.byte_value` returns, since no string holds one.
+fn byte_strings(r#gen: &mut dyn AssemblyGenerator, every_byte: bool) {
     r#gen.emit("\t.data");
     r#gen.emit("\t.balign\t8");
     r#gen.emit(".Lstone_bytes:");
-    for byte in 0..128 {
+    for byte in 0..if every_byte { 256 } else { 128 } {
         r#gen.emit("\t.quad\t1");
         r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
         r#gen.emit(&format!("\t.quad\t{byte}"));

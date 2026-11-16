@@ -40,7 +40,8 @@ use super::{
 };
 use crate::ast::{
     Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern,
-    PatternField, PatternKind, Stmt, StmtKind, UnaryOp, constant_int, is_lambda, is_test,
+    PatternField, PatternKind, Stmt, StmtKind, TypeExprKind, UnaryOp, constant_int, is_lambda,
+    is_test,
 };
 use crate::checker::{
     Analysis, Coercion, Conversion, Converter, DISPLAY, EQ, Enums, INVERT, Instance, Method,
@@ -61,7 +62,8 @@ use crate::stdlib::{
     ASSERTION_FAILED, BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, CUT_CHARACTER,
     END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, MAX_SHIFT, POP_EMPTY, POP_RANGE,
     PRELUDE_CLAMP, PRELUDE_SORT, PRINT_DEPTH, SHIFT_OVERFLOW, SHIFT_RANGE, SLICE_STEP_ZERO,
-    STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE, UNWRAP_OK, math, module_constant, random,
+    STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE, UNWRAP_OK, bytes_read_range, bytes_read_width,
+    math, module_constant, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -1172,6 +1174,18 @@ impl<'a> Lowerer<'a> {
             }
             collect_assigned(body, &mut assigned);
             collect_changed(body, &mut changed, self.context.methods);
+            // a parameter a sum starts from is owned too (`sum_starts`)
+            if let Some(owned) = self
+                .base
+                .as_ref()
+                .and_then(|base| self.context.owned_params.get(base))
+            {
+                for (arg, &owned) in args.iter().zip(owned) {
+                    if owned {
+                        changed.insert(arg.arg.clone());
+                    }
+                }
+            }
             for (name, _) in &assigned {
                 for leaf in self.leaf_names(name) {
                     self.local(&leaf);
@@ -2552,7 +2566,10 @@ impl<'a> Lowerer<'a> {
                     }
                     Some(value) => {
                         // returning releases every local, so a call can take any of them
-                        if self.is_stone_call(value) || self.is_elementwise(value) {
+                        if self.is_stone_call(value)
+                            || self.is_elementwise(value)
+                            || self.is_string_sum(value)
+                        {
                             self.movable = self.last_uses(stmt);
                         }
                         let kinds = self.leaf_kinds(value)?;
@@ -4694,6 +4711,7 @@ impl<'a> Lowerer<'a> {
                     dst,
                     text,
                     index: Operand::Reg(next),
+                    width: 1,
                 });
                 Operand::Imm(1)
             }
@@ -5651,6 +5669,16 @@ impl<'a> Lowerer<'a> {
         // taken first, so that no call among the operands moves the variable the sum starts from
         let movable = std::mem::take(&mut self.movable);
         let mut sum = self.expr(first)?;
+        if let [piece] = pieces[..]
+            && ty == Type::Bytes
+            && let ExprKind::Subscript { value, slice, .. } = &piece.kind
+            && let ExprKind::Slice { lower, upper, step } = &slice.kind
+            && step
+                .as_deref()
+                .is_none_or(|step| constant_int(step) == Some(1))
+        {
+            return self.append_slice(sum, first, &movable, value, [lower, upper], into);
+        }
         let mut values = Vec::with_capacity(pieces.len());
         for piece in &pieces {
             values.push(self.expr(piece)?);
@@ -5688,6 +5716,61 @@ impl<'a> Lowerer<'a> {
             owned = true;
         }
         self.own(sum, RcKind::of(&ty));
+        Ok(sum)
+    }
+
+    /// Lowers `first + source[lower:upper]` on bytes, whose `first` is already `sum`, through
+    /// `stone.bytes_append_slice`, which copies the bytes the slice picks onto the sum without
+    /// making the slice, in place when nothing else refers to the sum. So `out += src[a:b]`
+    /// allocates nothing once `out` has room. A sum this code does not own is retained first,
+    /// so the routine copies it, as `stone.str_concat` would.
+    fn append_slice(
+        &mut self,
+        sum: Operand,
+        first: &Expr,
+        movable: &[String],
+        source: &Expr,
+        bounds: [&Option<Box<Expr>>; 2],
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let present: Vec<&Expr> = bounds.iter().filter_map(|b| b.as_deref()).collect();
+        let source = self.list_operand(source, &present)?;
+        let mut args = vec![sum, source];
+        // bit 2 says the step is missing, so it is 1
+        let mut omitted = 4;
+        for (bit, bound) in bounds.into_iter().enumerate() {
+            match bound {
+                Some(bound) => args.push(self.expr(bound)?),
+                None => {
+                    args.push(Operand::Imm(0));
+                    omitted |= 1 << bit;
+                }
+            }
+        }
+        args.push(Operand::Imm(omitted));
+        let mut owned = match sum {
+            Operand::Reg(reg) => self.owned.remove(&reg).is_some(),
+            Operand::Imm(_) => false,
+        };
+        if !owned
+            && let ExprKind::Name { id, .. } = &first.kind
+            && movable.contains(id)
+            && self.is_counted_variable(id)
+        {
+            owned = self.mark_moved(id);
+        }
+        if !owned {
+            self.push(Inst::Retain { src: sum });
+        }
+        let dst = self.dst(into);
+        self.push(Inst::Call {
+            dsts: vec![dst],
+            callee: Callee::Runtime("stone.bytes_append_slice"),
+            args,
+        });
+        self.release_temp(source);
+        let sum = Operand::Reg(dst);
+        self.own(sum, Some(RcKind::Str));
         Ok(sum)
     }
 
@@ -5937,6 +6020,43 @@ impl<'a> Lowerer<'a> {
             dst,
             text: bytes,
             index: position,
+            width: 1,
+        });
+        self.release_temp(bytes);
+        Ok(Operand::Reg(dst))
+    }
+
+    /// Lowers a read of `width` bytes from `index` on, such as `b.u32_le(i)`, into checks that
+    /// `index` is at least 0 and at most the length less `width`, which cannot overflow, and one
+    /// `bytes_load`, releasing a temporary `bytes`.
+    ///
+    /// For example, `b.u32_le(i)` becomes `v2 = str_len v0`, `v3 = sub v2, 4`, checks of `v1`
+    /// against 0 and `v3`, then `v4 = bytes_load4 v0, v1`.
+    fn bytes_read(
+        &mut self,
+        bytes: Operand,
+        index: Operand,
+        width: usize,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let len = self.str_len(bytes, None);
+        let message = bytes_read_range(width);
+        let values = vec![index, len];
+        self.fail_unless_with(Cond::Ge, index, Operand::Imm(0), message, values.clone());
+        let limit = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Sub,
+            dst: limit,
+            lhs: len,
+            rhs: Operand::Imm(width as i64),
+        });
+        self.fail_unless_with(Cond::Le, index, Operand::Reg(limit), message, values);
+        let dst = self.dst(into);
+        self.push(Inst::StrByte {
+            dst,
+            text: bytes,
+            index,
+            width: width as u8,
         });
         self.release_temp(bytes);
         Ok(Operand::Reg(dst))
@@ -5990,6 +6110,7 @@ impl<'a> Lowerer<'a> {
             dst: byte,
             text,
             index: position,
+            width: 1,
         });
         self.release_temp(text);
         self.fail_unless_with(
@@ -6664,6 +6785,16 @@ impl<'a> Lowerer<'a> {
             // lowered as `math.abs` and `math.floor` of the receiver
             "abs" => self.math("math.abs", std::slice::from_ref(receiver), into),
             "floor" => self.math("math.floor", std::slice::from_ref(receiver), into),
+            "trailing_zeros" | "leading_zeros" => {
+                let src = self.expr(receiver)?;
+                let dst = self.dst(into);
+                self.push(Inst::BitCount {
+                    dst,
+                    src,
+                    leading: name == "leading_zeros",
+                });
+                Ok(Operand::Reg(dst))
+            }
             "cmp" => {
                 let ty = self.type_of(receiver)?;
                 let lhs = self.expr(receiver)?;
@@ -6841,6 +6972,12 @@ impl<'a> Lowerer<'a> {
             "bytes" => {
                 let text = self.expr(receiver)?;
                 Ok(self.finish(text, into))
+            }
+            _ if let Some(width) = bytes_read_width(name) => {
+                let index = &args[0];
+                let bytes = self.list_operand(receiver, &[index])?;
+                let index = self.expr(index)?;
+                self.bytes_read(bytes, index, width, into)
             }
             "text" => {
                 let bytes = self.expr(receiver)?;
@@ -7503,6 +7640,16 @@ impl<'a> Lowerer<'a> {
                 Ok(self.enum_done(flat, dsts))
             }
             "eof" => Ok(self.runtime_call("stone.eof", vec![], into)),
+            "byte" => {
+                let value = self.expr(&args[0])?;
+                let values = vec![value];
+                self.fail_unless_with(Cond::Ge, value, Operand::Imm(0), BYTE_RANGE, values.clone());
+                self.fail_unless_with(Cond::Le, value, Operand::Imm(255), BYTE_RANGE, values);
+                // an entry of a table of immortal bytes, which releasing never frees
+                let result = self.runtime_call("stone.byte_value", vec![value], into);
+                self.own(result, kind);
+                Ok(result)
+            }
             "args" => {
                 let result = self.runtime_call("stone.args", vec![], into);
                 self.own(result, kind);
@@ -10883,11 +11030,18 @@ fn owned_params(body: &[Stmt], methods: &Methods) -> HashMap<String, Vec<bool>> 
         collect_assigned(body, &mut assigned);
         let mut changed = HashSet::new();
         collect_changed(body, &mut changed, methods);
+        let mut sums = HashSet::new();
+        sum_starts(body, &mut sums);
         let params = args
             .args
             .iter()
             .map(|arg| {
-                changed.contains(&arg.arg) || assigned.iter().any(|(name, _)| *name == arg.arg)
+                changed.contains(&arg.arg)
+                    || assigned.iter().any(|(name, _)| *name == arg.arg)
+                    || (sums.contains(arg.arg.as_str())
+                        && arg.annotation.as_ref().is_some_and(|ty| {
+                            matches!(ty.kind, TypeExprKind::Str | TypeExprKind::Bytes)
+                        }))
             })
             .collect();
         owned.insert(name, params);
@@ -10920,6 +11074,45 @@ fn owned_params(body: &[Stmt], methods: &Methods) -> HashMap<String, Vec<bool>> 
         }
     }
     owned
+}
+
+/// Adds to `names` every variable that starts a chain of `+` that is the whole value of a `ret`
+/// or an assignment in `body`, such as `out` in `ret out + x`.
+///
+/// A `str` or `bytes` parameter that does is owned, so at its last use the sum takes the
+/// caller's reference and appends in place rather than copying the caller's text.
+fn sum_starts<'a>(body: &'a [Stmt], names: &mut HashSet<&'a str>) {
+    for stmt in body {
+        let value = match &stmt.kind {
+            StmtKind::Return { value: Some(value) } => Some(&**value),
+            StmtKind::Assign { value, .. } => Some(&**value),
+            _ => None,
+        };
+        if let Some(mut first) = value
+            && matches!(
+                first.kind,
+                ExprKind::BinOp {
+                    op: Operator::Add,
+                    ..
+                }
+            )
+        {
+            while let ExprKind::BinOp {
+                op: Operator::Add,
+                left,
+                ..
+            } = &first.kind
+            {
+                first = left;
+            }
+            if let ExprKind::Name { id, .. } = &first.kind {
+                names.insert(id.as_str());
+            }
+        }
+        for block in stmt.blocks() {
+            sum_starts(block, names);
+        }
+    }
 }
 
 /// What `==` compares in turn, from [`Lowerer::compared`]: one value, or the values of a struct

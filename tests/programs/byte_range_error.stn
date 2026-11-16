@@ -1,0 +1,4 @@
+// a value that is not a byte stops byte()
+print(byte(255))
+n = -1
+print(b"a" + byte(n))

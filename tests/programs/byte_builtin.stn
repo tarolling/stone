@@ -1,0 +1,23 @@
+// byte(x) gives bytes of one byte, appended without a list or a result
+print(byte(0), byte(65), byte(127), byte(128), byte(255))
+print(byte(200).len(), byte(7)[0], byte(97).text().unwrap())
+
+fn encode(n: int) -> bytes:
+    out = b""
+    v = n
+    while v >= 128:
+        out += byte(v % 128 + 128)
+        v = v / 128
+    ret out + byte(v)
+
+all = b""
+values = []
+for i in range(256):
+    all += byte(i)
+    values.append(i)
+print(all.len(), all[0], all[255], all == bytes(values).unwrap())
+print(encode(0), encode(300), encode(1000000))
+kept = byte(1)
+copy = kept
+copy += byte(2)
+print(kept, copy, byte(3) + byte(4) == b"\x03\x04")

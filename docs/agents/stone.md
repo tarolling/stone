@@ -77,7 +77,7 @@ The differences from Python here: `fn` instead of `def`, a type on every paramet
 return value, `ret` instead of `return`, `cont` instead of `continue`, `true`/`false`, `//`
 comments, double-quoted strings only, every string writing the values of the `{expression}`s in
 it with no `f` prefix (`{{` and `}}` for braces), `xs.len()` instead of `len(xs)`, and `x.abs()`
-instead of `abs(x)`. Variables are never annotated; their types are inferred. `for _ in range(n):` works for
+instead of `abs(x)` (ints also have `n.trailing_zeros()` and `n.leading_zeros()`, over 64 bits). Variables are never annotated; their types are inferred. `for _ in range(n):` works for
 a loop variable you do not need, and `main` is an ordinary function name.
 
 A value that never changes is a constant, `const max_size = 1 << 10`, written at the top level of
@@ -94,7 +94,7 @@ variable, a list, or a map. Nothing assigns it, and no variable takes its name.
 | `float` | `1.5`, `2e-3` | never mixed with `int`: `float(n)`, `int(x)?` (see conversions) |
 | `bool` | `true` | the only type a condition accepts |
 | `str` | `"hi\n"` | immutable UTF-8 bytes; `s[i]`, `s[a:b]`, `+` to join |
-| `bytes` | `b"\x00\xff"` | immutable raw bytes; `b[i]` is an int, slices, `+`, `"s".bytes()`, `b.text()` (a result), `bytes([1, 2])` (a result) |
+| `bytes` | `b"\x00\xff"` | immutable raw bytes; `b[i]` is an int, slices, `+`, `"s".bytes()`, `b.text()` (a result), `bytes([1, 2])` (a result), `byte(65)` (one byte; stops outside 0-255), `b.u32_le(i)` (also `u16_le`, `u64_le`: little-endian int, stops past the end) |
 | `list[T]` | `[1, 2]`, `[]` | all elements one type |
 | `map[K, V]` | `{"a": 1}`, `{}` | keys `int`, `str`, or `bool`; insertion order |
 | `set[T]` | `{1, 2}`, `{}` | elements `int`, `str`, or `bool`; insertion order; `{}` is a set when its use says so |

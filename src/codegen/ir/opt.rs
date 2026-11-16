@@ -499,6 +499,7 @@ enum Computation {
     FloatAbs,
     FloatSqrt,
     Not,
+    BitCount(bool),
     Compare(Cond, bool),
     IntToFloat,
     FloatToInt(Rounding),
@@ -545,6 +546,7 @@ fn computation(inst: &Inst) -> Option<(Computation, Operand, Operand, VReg)> {
         Inst::FloatAbs { dst, src } => (Computation::FloatAbs, src, none, dst),
         Inst::FloatSqrt { dst, src } => (Computation::FloatSqrt, src, none, dst),
         Inst::Not { dst, src } => (Computation::Not, src, none, dst),
+        Inst::BitCount { dst, src, leading } => (Computation::BitCount(leading), src, none, dst),
         Inst::IntToFloat { dst, src } => (Computation::IntToFloat, src, none, dst),
         Inst::FloatToInt {
             dst, src, rounding, ..
@@ -958,6 +960,7 @@ fn is_arithmetic(inst: &Inst) -> bool {
         | Inst::FloatAbs { .. }
         | Inst::FloatSqrt { .. }
         | Inst::Not { .. }
+        | Inst::BitCount { .. }
         | Inst::Compare { .. }
         | Inst::IntToFloat { .. }
         | Inst::FloatToInt { checked: false, .. } => true,
@@ -985,6 +988,7 @@ fn is_removable(inst: &Inst) -> bool {
         | Inst::FloatAbs { .. }
         | Inst::FloatToInt { checked: false, .. }
         | Inst::Not { .. }
+        | Inst::BitCount { .. }
         | Inst::Compare { .. }
         | Inst::IntToFloat { .. }
         | Inst::ListLen { .. }
@@ -1579,7 +1583,9 @@ pub fn never_negative(function: &Function) -> HashSet<VReg> {
                 };
                 !writes[reg].iter().all(|inst| match inst {
                     Inst::Copy { src, .. } => from(src),
-                    Inst::ListLen { .. } | Inst::StrLen { .. } | Inst::StrByte { .. } => true,
+                    Inst::ListLen { .. } | Inst::StrLen { .. } | Inst::BitCount { .. } => true,
+                    // eight bytes may set the sign bit
+                    Inst::StrByte { width, .. } => *width < 8,
                     Inst::Binary {
                         op: BinOp::Add,
                         lhs,

@@ -351,11 +351,13 @@ fn errno(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tneg\tx0, x0");
 }
 
-/// Emits a loop that copies `count` bytes from `src` to `dst`, advancing both and counting
-/// `count` down to 0. It clobbers `w16`, and uses `label` and `label_done` as its labels.
+/// Emits a copy of `count` bytes from `src` to `dst`, which must not overlap, advancing both and
+/// counting `count` down to 0. From 8 bytes on it copies 8 at a time, then a last 8 that may
+/// overlap those before it, and fewer go a byte at a time. It clobbers `x16`, and its labels
+/// start with `label`.
 ///
 /// For example, `copy_bytes(gen, "x9", "x19", "x21", ".Lstr_concat_left")` copies `x21` bytes
-/// from `x19` to `x9`.
+/// from `x19` to `x9`, 13 of them as the 8 at offset 0 and then the 8 at offset 5.
 pub(super) fn copy_bytes(
     r#gen: &mut dyn AssemblyGenerator,
     dst: &str,
@@ -364,11 +366,27 @@ pub(super) fn copy_bytes(
     label: &str,
 ) {
     r#gen.emit(&format!("{label}:"));
+    r#gen.emit(&format!("\tcmp\t{count}, #8"));
+    r#gen.emit(&format!("\tb.lo\t{label}_byte"));
+    r#gen.emit(&format!("{label}_word:"));
+    r#gen.emit(&format!("\tldr\tx16, [{src}], #8"));
+    r#gen.emit(&format!("\tstr\tx16, [{dst}], #8"));
+    r#gen.emit(&format!("\tsub\t{count}, {count}, #8"));
+    r#gen.emit(&format!("\tcmp\t{count}, #8"));
+    r#gen.emit(&format!("\tb.hs\t{label}_word"));
+    // the last 8 bytes, some of which may be copied again
+    r#gen.emit(&format!("\tadd\t{src}, {src}, {count}"));
+    r#gen.emit(&format!("\tadd\t{dst}, {dst}, {count}"));
+    r#gen.emit(&format!("\tldur\tx16, [{src}, #-8]"));
+    r#gen.emit(&format!("\tstur\tx16, [{dst}, #-8]"));
+    r#gen.emit(&format!("\tmov\t{count}, #0"));
+    r#gen.emit(&format!("\tb\t{label}_done"));
+    r#gen.emit(&format!("{label}_byte:"));
     r#gen.emit(&format!("\tcbz\t{count}, {label}_done"));
     r#gen.emit(&format!("\tldrb\tw16, [{src}], #1"));
     r#gen.emit(&format!("\tstrb\tw16, [{dst}], #1"));
     r#gen.emit(&format!("\tsub\t{count}, {count}, #1"));
-    r#gen.emit(&format!("\tb\t{label}"));
+    r#gen.emit(&format!("\tb\t{label}_byte"));
     r#gen.emit(&format!("{label}_done:"));
 }
 
@@ -2404,6 +2422,10 @@ pub(super) fn slice_bounds(r#gen: &mut dyn AssemblyGenerator, routine: &str) {
     r#gen.emit("\tmov\tx22, #0");
     r#gen.emit("\tcmp\tx11, #0");
     r#gen.emit(&format!("\tb.le\t{}", label("counted")));
+    // a step of 1 either way covers the distance, with no division
+    r#gen.emit("\tmov\tx22, x11");
+    r#gen.emit("\tcmp\tx12, #1");
+    r#gen.emit(&format!("\tb.eq\t{}", label("counted")));
     r#gen.emit("\tsub\tx11, x11, #1");
     r#gen.emit("\tudiv\tx11, x11, x12");
     r#gen.emit("\tadd\tx22, x11, #1");
@@ -3166,8 +3188,13 @@ pub fn string_methods(
         r#gen.emit("\tmov\tx0, x20");
         pop_frame(r#gen, &saved);
     }
-    if uses("stone.str_at") || uses("stone.str_char") {
-        byte_strings(r#gen);
+    if uses("stone.str_at") || uses("stone.str_char") || uses("stone.byte_value") {
+        byte_strings(r#gen, uses("stone.byte_value"));
+    }
+    if uses("stone.byte_value") {
+        r#gen.emit("stone.byte_value:");
+        r#gen.emit("\tmov\tx9, x0");
+        byte_string(r#gen);
     }
     if uses("stone.str_at") {
         r#gen.emit("stone.str_at:");
@@ -3511,14 +3538,14 @@ fn str_replace(r#gen: &mut dyn AssemblyGenerator) {
 }
 
 /// Emits the table of the 128 one-byte strings that `stone.str_at` and `stone.str_char` (see
-/// [`string_methods`]) return for an ASCII byte, laid out as the x86-64 table is: entry `b` is 32
-/// bytes at `32 * b`, a length of 1, an immortal reference count, the byte and its terminator,
-/// and padding.
-fn byte_strings(r#gen: &mut dyn AssemblyGenerator) {
+/// [`string_methods`]) return for an ASCII byte, or of all 256 when `stone.byte_value` returns
+/// them as `bytes` too, laid out as the x86-64 table is: entry `b` is 32 bytes at `32 * b`, a
+/// length of 1, an immortal reference count, the byte and its terminator, and padding.
+fn byte_strings(r#gen: &mut dyn AssemblyGenerator, every_byte: bool) {
     r#gen.emit("\t.data");
     r#gen.emit("\t.balign\t8");
     r#gen.emit(".Lstone_bytes:");
-    for byte in 0..128 {
+    for byte in 0..if every_byte { 256 } else { 128 } {
         r#gen.emit("\t.quad\t1");
         r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
         r#gen.emit(&format!("\t.quad\t{byte}"));

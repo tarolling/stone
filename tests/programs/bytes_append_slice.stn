@@ -1,0 +1,40 @@
+// appending a slice of bytes writes it onto the sum without making the slice
+fn add(out: bytes, src: bytes, a: int, b: int) -> bytes:
+    out += src[a:b]
+    ret out
+
+src = b"0123456789"
+out = b""
+out += src[2:5]
+print(out)
+out += src[-3:]
+out += src[:2]
+out += src[8:100]
+out += src[-100:1]
+out += src[5:2]
+out += src[3:3:1]
+print(out, out.len())
+
+// the sum appended to itself, growing past its block
+grow = b"ab"
+for _i in range(12):
+    grow += grow[:]
+print(grow.len(), grow[:6], grow[-4:])
+tail = b"xyz"
+for _i in range(40):
+    tail += tail[-3:]
+print(tail.len(), tail[-9:])
+
+// a sum something else holds is copied, leaving the other unchanged
+kept = b"keep"
+both = kept
+both += src[0:3]
+print(kept, both)
+same = kept + kept[1:3]
+print(kept, same)
+
+// through calls, which move the buffer in
+built = b""
+for i in range(1000):
+    built = add(built, src, i % 10, i % 10 + 3)
+print(built.len(), built[:12], built[-6:])

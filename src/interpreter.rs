@@ -2703,6 +2703,8 @@ impl<'out> Interpreter<'out> {
             ("abs", Value::Float(x), []) => Ok(Value::Float(math::abs_float(*x))),
             ("floor", Value::Int(x), []) => Ok(Value::Int(*x)),
             ("floor", Value::Float(x), []) => Ok(Value::Int(math::floor(*x)?)),
+            ("trailing_zeros", Value::Int(x), []) => Ok(Value::Int(x.trailing_zeros() as i64)),
+            ("leading_zeros", Value::Int(x), []) => Ok(Value::Int(x.leading_zeros() as i64)),
             (_, Value::Socket(socket), _) => {
                 // a read may wait, so what was printed shows first
                 self.out.flush()?;
@@ -2778,6 +2780,10 @@ impl<'out> Interpreter<'out> {
             ("len", Value::Str(s), []) => Ok(Value::Int(s.len() as i64)),
             ("len", Value::Bytes(b), []) => Ok(Value::Int(b.len() as i64)),
             ("bytes", Value::Str(s), []) => Ok(Value::Bytes(s.as_bytes().into())),
+            ("u16_le" | "u32_le" | "u64_le", Value::Bytes(b), [Value::Int(index)]) => {
+                let width = stdlib::bytes_read_width(name).unwrap_or(1);
+                Ok(Value::Int(stdlib::read_le(b, *index, width)?))
+            }
             ("text", Value::Bytes(b), []) => Ok(result(match fs::is_text(b) {
                 true => Ok(Value::Str(String::from_utf8_lossy(b).into_owned().into())),
                 false => Err(fs::INVALID_TEXT.to_string()),
@@ -3329,6 +3335,12 @@ impl<'out> Interpreter<'out> {
                     .read_line()
                     .ok_or_else(|| stdlib::END_OF_INPUT.to_string());
                 return Ok(result(line.map(|line| Value::Str(line.into()))));
+            }
+            ("byte", [Value::Int(n)]) => {
+                return match u8::try_from(*n) {
+                    Ok(byte) => Ok(Value::Bytes(Rc::from([byte]))),
+                    Err(_) => Err(stdlib::fill(stdlib::BYTE_RANGE, &[*n]).into()),
+                };
             }
             ("eof", []) => {
                 self.out.flush()?;

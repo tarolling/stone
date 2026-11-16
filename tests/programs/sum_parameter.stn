@@ -1,0 +1,22 @@
+// a parameter a sum starts from is owned, so `ret out + x` appends in place
+fn add(out: bytes, x: bytes) -> bytes:
+    ret out + x
+
+fn shout(s: str, times: int) -> str:
+    t = s + "!"
+    for _i in range(times - 1):
+        t += "!"
+    ret t
+
+out = b""
+for i in range(1000):
+    out = add(out, b"ab")
+print(out.len())
+
+// the caller's value is kept when it reads it again
+a = b"x"
+c = add(a, b"y")
+print(a, c)
+word = "hey"
+print(shout(word, 3), word)
+print(add(add(b"1", b"2"), b"3"))

@@ -115,6 +115,9 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if uses("stone.bytes_slice_of") {
         slice_of(r#gen);
     }
+    if uses("stone.bytes_append_slice") {
+        append_slice(r#gen);
+    }
     if uses("stone.bytes_check") {
         // rcx holds the count, rsi the values, and rax the position
         r#gen.emit("stone.bytes_check:");
@@ -420,6 +423,103 @@ fn slice_of(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lbytes_slice_of_copied:");
     r#gen.emit("\tmov\trax, r15");
     r#gen.emit(".Lbytes_slice_of_end:");
+    r#gen.emit("\tlea\trsp, [rbp - 40]");
+    for reg in ["r15", "r14", "r13", "r12", "rbx"] {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.bytes_append_slice`, which appends to the bytes in `rdi`, which it owns, the
+/// slice from `rdx` to `rcx` (with step 1) of the bytes in `rsi`, which it borrows, without
+/// making the slice: `r8` says which bounds are missing as in [`super::builtins::slice_bounds`].
+/// As `stone.str_append` does, it writes in place when nothing else refers to the sum, growing
+/// its block to at least twice its size, and otherwise copies the sum and drops its reference.
+/// The source may be the sum itself (`out += out[a:b]`), so it is read after any growth.
+fn append_slice(r#gen: &mut dyn AssemblyGenerator) {
+    // r15 holds the sum, rbx the source (0 while it is the sum's block being moved), r12 the
+    // first index, r14 the count, and r13 the sum's length
+    r#gen.emit("stone.bytes_append_slice:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    for reg in ["rbx", "r12", "r13", "r14", "r15"] {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\tr15, rdi");
+    r#gen.emit("\tmov\trbx, rsi");
+    r#gen.emit("\tmov\tr9, QWORD PTR [rsi - 16]");
+    r#gen.emit("\tmov\trsi, rdx");
+    r#gen.emit("\tmov\trdx, rcx");
+    r#gen.emit("\tor\tr8, 4");
+    super::builtins::slice_bounds(r#gen, "bytes_append_slice");
+    r#gen.emit("\tmov\trax, r15");
+    r#gen.emit("\ttest\tr14, r14");
+    r#gen.emit("\tjz\t.Lbytes_append_slice_end");
+    r#gen.emit("\tmov\tr13, QWORD PTR [r15 - 16]");
+    r#gen.emit("\tcmp\tQWORD PTR [r15 - 8], 1");
+    r#gen.emit("\tjne\t.Lbytes_append_slice_copy");
+    // the bytes the sum needs, and those its block holds, as in `stone.str_append`
+    r#gen.emit("\tlea\trsi, [r13 + r14 + 17]");
+    r#gen.emit("\tlea\trdi, [r15 - 16]");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rdi - 8]");
+    r#gen.emit("\tmov\trdx, rcx");
+    r#gen.emit(&format!(
+        "\tcmp\trcx, {}",
+        crate::codegen::context::LARGEST_CLASS
+    ));
+    r#gen.emit("\tja\t.Lbytes_append_slice_room");
+    r#gen.emit("\tmov\tedx, 1");
+    super::builtins::shift_by_cl(r#gen, "shl", "rdx");
+    r#gen.emit(".Lbytes_append_slice_room:");
+    r#gen.emit("\tsub\trdx, 8");
+    r#gen.emit("\tcmp\trsi, rdx");
+    r#gen.emit("\tjbe\t.Lbytes_append_slice_write");
+    r#gen.emit("\tadd\trdx, rdx");
+    r#gen.emit("\tcmp\trsi, rdx");
+    r#gen.emit("\tcmovb\trsi, rdx");
+    // growing may move the block, and the source with it if it is the sum
+    r#gen.emit("\tcmp\trbx, r15");
+    r#gen.emit("\tjne\t.Lbytes_append_slice_grow");
+    r#gen.emit("\txor\tebx, ebx");
+    r#gen.emit(".Lbytes_append_slice_grow:");
+    r#gen.emit("\tcall\tstone.mem_realloc");
+    r#gen.emit("\tlea\tr15, [rax + 16]");
+    r#gen.emit("\ttest\trbx, rbx");
+    r#gen.emit("\tjnz\t.Lbytes_append_slice_write");
+    r#gen.emit("\tmov\trbx, r15");
+    r#gen.emit(".Lbytes_append_slice_write:");
+    r#gen.emit("\tlea\trdi, [r15 + r13]");
+    r#gen.emit("\tlea\trsi, [rbx + r12]");
+    r#gen.emit("\tmov\trcx, r14");
+    super::builtins::copy_bytes(r#gen, ".Lbytes_append_slice_bytes");
+    r#gen.emit("\tmov\tbyte ptr [rdi], 0");
+    r#gen.emit("\tadd\tr13, r14");
+    r#gen.emit("\tmov\tQWORD PTR [r15 - 16], r13");
+    r#gen.emit("\tmov\trax, r15");
+    r#gen.emit("\tjmp\t.Lbytes_append_slice_end");
+    // something else refers to the sum, so the sum and the slice go into new bytes
+    r#gen.emit(".Lbytes_append_slice_copy:");
+    r#gen.emit("\tadd\tr12, rbx");
+    r#gen.emit("\tlea\trdi, [r13 + r14]");
+    r#gen.emit("\tcall\tstone.str_new");
+    r#gen.emit("\tmov\trbx, rax");
+    r#gen.emit("\tmov\trdi, rax");
+    r#gen.emit("\tmov\trsi, r15");
+    r#gen.emit("\tmov\trcx, r13");
+    super::builtins::copy_bytes(r#gen, ".Lbytes_append_slice_old");
+    r#gen.emit("\tmov\trsi, r12");
+    r#gen.emit("\tmov\trcx, r14");
+    super::builtins::copy_bytes(r#gen, ".Lbytes_append_slice_new");
+    r#gen.emit("\tmov\tbyte ptr [rdi], 0");
+    r#gen.emit("\tdec\tQWORD PTR [r15 - 8]");
+    r#gen.emit("\tjnz\t.Lbytes_append_slice_kept");
+    r#gen.emit("\tmov\trax, r15");
+    r#gen.emit("\tcall\tstone.free_str");
+    r#gen.emit(".Lbytes_append_slice_kept:");
+    r#gen.emit("\tmov\trax, rbx");
+    r#gen.emit(".Lbytes_append_slice_end:");
     r#gen.emit("\tlea\trsp, [rbp - 40]");
     for reg in ["r15", "r14", "r13", "r12", "rbx"] {
         r#gen.emit(&format!("\tpop\t{reg}"));

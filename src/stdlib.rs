@@ -148,8 +148,8 @@ pub const MAX_ELEMENT_VALUES: usize = 32;
 /// Names of the builtin functions.
 ///
 /// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3):`.
-pub static BUILTINS: [&str; 10] = [
-    "print", "eprint", "range", "int", "float", "str", "bytes", "input", "eof", "args",
+pub static BUILTINS: [&str; 11] = [
+    "print", "eprint", "range", "int", "float", "str", "bytes", "input", "byte", "eof", "args",
 ];
 
 /// The prelude, a stone file linked into every program, which defines `option[T]`, `ordering`,
@@ -233,7 +233,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 69] = [
+pub static METHODS: [&str; 74] = [
     "len",
     "append",
     "pop",
@@ -288,6 +288,8 @@ pub static METHODS: [&str; 69] = [
     "clamp",
     "abs",
     "floor",
+    "trailing_zeros",
+    "leading_zeros",
     "display",
     "send",
     "read_line",
@@ -298,6 +300,9 @@ pub static METHODS: [&str; 69] = [
     "close",
     "bytes",
     "text",
+    "u16_le",
+    "u32_le",
+    "u64_le",
     "set_timeout",
     "send_bytes",
     "read_bytes",
@@ -372,7 +377,7 @@ pub struct BuiltinDoc {
     pub description: &'static str,
 }
 
-pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
+pub static BUILTIN_DOCS: [BuiltinDoc; 11] = [
     BuiltinDoc {
         name: "print",
         signature: "print(values...)",
@@ -427,6 +432,13 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
         description: "Writes `prompt`, if given, then reads a line from standard input and \
                       returns `ok` of it without its newline, or `err(\"end of input\")` once \
                       the input is over, so `line = input()?` passes the end on.",
+    },
+    BuiltinDoc {
+        name: "byte",
+        signature: "byte(value: int) -> bytes",
+        description: "Returns `bytes` of the one byte `value`, stopping the program unless it is \
+                      from 0 to 255, so `out += byte(n)` appends a byte without making a list. \
+                      Compiled, it allocates nothing.",
     },
     BuiltinDoc {
         name: "eof",
@@ -526,7 +538,7 @@ pub static TYPE_DOCS: [BuiltinDoc; 13] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 69] = [
+pub static METHOD_DOCS: [BuiltinDoc; 74] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | bytes | list[T] | map[K, V] | set[T]).len() -> int",
@@ -900,6 +912,20 @@ pub static METHOD_DOCS: [BuiltinDoc; 69] = [
                       nan or does not fit in an int.",
     },
     BuiltinDoc {
+        name: "trailing_zeros",
+        signature: "int.trailing_zeros() -> int",
+        description: "Returns how many of the int's 64 bits are 0 below its lowest 1 bit, so \
+                      `40.trailing_zeros()` is 3, `(-2).trailing_zeros()` is 1, and \
+                      `0.trailing_zeros()` is 64.",
+    },
+    BuiltinDoc {
+        name: "leading_zeros",
+        signature: "int.leading_zeros() -> int",
+        description: "Returns how many of the int's 64 bits are 0 above its highest 1 bit, so \
+                      `40.leading_zeros()` is 58, a negative int's is 0, and \
+                      `0.leading_zeros()` is 64.",
+    },
+    BuiltinDoc {
         name: "display",
         signature: "T.display() -> str",
         description: "Returns the text `print` writes for the value, as `str` does, for any \
@@ -962,6 +988,27 @@ pub static METHOD_DOCS: [BuiltinDoc; 69] = [
         signature: "bytes.text() -> result[str, str]",
         description: "Returns `ok` of the bytes as a string if they are UTF-8 text without a \
                       null byte, which a string cannot hold, or `err(\"not valid UTF-8 text\")`.",
+    },
+    BuiltinDoc {
+        name: "u16_le",
+        signature: "bytes.u16_le(index: int) -> int",
+        description: "Returns the 2 bytes from `index` on as a little-endian int, \
+                      stopping the program unless all 2 are in the bytes. A negative index \
+                      never counts from the end. Compiled, it is one load after one check.",
+    },
+    BuiltinDoc {
+        name: "u32_le",
+        signature: "bytes.u32_le(index: int) -> int",
+        description: "Returns the 4 bytes from `index` on as a little-endian int, \
+                      stopping the program unless all 4 are in the bytes. A negative index \
+                      never counts from the end. Compiled, it is one load after one check.",
+    },
+    BuiltinDoc {
+        name: "u64_le",
+        signature: "bytes.u64_le(index: int) -> int",
+        description: "Returns the 8 bytes from `index` on as a little-endian int that wraps to a negative one when the last byte is 128 or more, \
+                      stopping the program unless all 8 are in the bytes. A negative index \
+                      never counts from the end. Compiled, it is one load after one check.",
     },
     BuiltinDoc {
         name: "set_timeout",
@@ -1407,6 +1454,45 @@ pub fn repr_bytes(bytes: &[u8]) -> String {
 /// The runtime error for an index past either end of bytes, as in `b"a"[1]`, with the index and
 /// the length filled in as for [`INDEX_RANGE`].
 pub const BYTES_INDEX_RANGE: &str = "bytes index out of range (index {}, length {})";
+
+/// Returns the width in bytes of a read method of `bytes`, such as 4 for `u32_le`, if `name` is
+/// one.
+pub fn bytes_read_width(name: &str) -> Option<usize> {
+    match name {
+        "u16_le" => Some(2),
+        "u32_le" => Some(4),
+        "u64_le" => Some(8),
+        _ => None,
+    }
+}
+
+/// Returns the message a read of `width` bytes outside its bytes stops with, its holes the index
+/// and the length, such as `u32_le index out of range (index 5, length 8)`.
+pub fn bytes_read_range(width: usize) -> &'static str {
+    match width {
+        2 => "u16_le index out of range (index {}, length {})",
+        4 => "u32_le index out of range (index {}, length {})",
+        _ => "u64_le index out of range (index {}, length {})",
+    }
+}
+
+/// Reads `width` bytes of `bytes` from `index` on as a little-endian int, a read of 8 wrapping
+/// past `i64::MAX`, or gives the error [`bytes_read_range`] words.
+///
+/// For example, `read_le(b"\x01\x02\x03", 1, 2)` is `Ok(0x0302)`.
+pub fn read_le(bytes: &[u8], index: i64, width: usize) -> Result<i64, String> {
+    let start = usize::try_from(index).ok().filter(|start| {
+        start
+            .checked_add(width)
+            .is_some_and(|end| end <= bytes.len())
+    });
+    let Some(start) = start else {
+        return Err(fill(bytes_read_range(width), &[index, bytes.len() as i64]));
+    };
+    let mut word = [0; 8];
+    word[..width].copy_from_slice(&bytes[start..start + width]);
+    Ok(i64::from_le_bytes(word))
+}
 
 /// The runtime error of `bytes(values)` for a value that is not a byte, with the value filled in.
 pub const BYTE_RANGE: &str = "byte out of range (value {})";

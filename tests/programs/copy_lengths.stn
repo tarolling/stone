@@ -1,0 +1,15 @@
+// every length a short or long copy takes, through slices, sums, appends, and joins
+text = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJ"
+data = text.bytes()
+for n in range(41):
+    piece = text[3:3 + n]
+    joined = "-".join([piece, text[:n]])
+    sum = text[:n] + piece
+    grown = "<"
+    grown += piece
+    out = b"#"
+    out += data[5:5 + n]
+    out += out[1:]
+    assert piece.len() == n
+    assert sum == text[:n] + text[3:3 + n]
+    print("{n} {piece} {joined} {grown} {sum.len()} {out.text().unwrap()}")

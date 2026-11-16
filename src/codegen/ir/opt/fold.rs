@@ -122,6 +122,7 @@ fn folded(inst: &Inst, constants: &Constants) -> Inst {
             | Inst::FloatAbs { .. }
             | Inst::FloatSqrt { .. }
             | Inst::Not { .. }
+            | Inst::BitCount { .. }
             | Inst::Compare { .. }
             | Inst::IntToFloat { .. }
             | Inst::FloatToInt { checked: false, .. }
@@ -309,6 +310,15 @@ pub(super) fn evaluate(inst: &Inst) -> Option<i64> {
             src: Operand::Imm(a),
             ..
         } => Some((a == 0) as i64),
+        Inst::BitCount {
+            src: Operand::Imm(a),
+            leading,
+            ..
+        } => Some(if leading {
+            a.leading_zeros()
+        } else {
+            a.trailing_zeros()
+        } as i64),
         Inst::Compare {
             cond,
             float,
@@ -393,6 +403,22 @@ mod tests {
         );
         assert_eq!(float_binary(BinOp::Sub, f64::INFINITY, f64::INFINITY), None);
         assert_eq!(float_binary(BinOp::Rem, 5.0, 3.0), None);
+    }
+
+    #[test]
+    fn bit_counts_fold_over_64_bits() {
+        let count = |src: i64, leading| {
+            evaluate(&Inst::BitCount {
+                dst: VReg(0),
+                src: Operand::Imm(src),
+                leading,
+            })
+        };
+        assert_eq!(count(40, false), Some(3));
+        assert_eq!(count(40, true), Some(58));
+        assert_eq!(count(0, false), Some(64));
+        assert_eq!(count(0, true), Some(64));
+        assert_eq!(count(-1, true), Some(0));
     }
 
     #[test]

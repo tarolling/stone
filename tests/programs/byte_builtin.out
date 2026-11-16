@@ -1,0 +1,5 @@
+b'\x00' b'A' b'\x7f' b'\x80' b'\xff'
+1 7 a
+256 0 255 true
+b'\x00' b'\xac\x02' b'\xc0\x84='
+b'\x01' b'\x01\x02' true

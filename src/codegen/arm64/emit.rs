@@ -1296,6 +1296,19 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
+            Inst::BitCount { dst, src, leading } => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                let target = self.target(dst);
+                let src = self.base(src, "x10");
+                if *leading {
+                    self.emit(&format!("\tclz\t{target}, {src}"));
+                } else {
+                    self.emit(&format!("\trbit\t{target}, {src}"));
+                    self.emit(&format!("\tclz\t{target}, {target}"));
+                }
+                self.store(dst, target);
+            }
+
             Inst::Compare {
                 cond,
                 float,
@@ -1415,17 +1428,32 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
-            Inst::StrByte { dst, text, index } => {
+            Inst::StrByte {
+                dst,
+                text,
+                index,
+                width,
+            } => {
                 let (dst, text, index) =
                     (frame.reg(*dst)?, frame.value(*text)?, frame.value(*index)?);
+                let width = i64::from(*width);
                 let base = self.base(text, "x10");
                 let byte = match index {
-                    Value::Imm(n) if (0..4096).contains(&n) => format!("[{base}, #{n}]"),
+                    // the scaled offset form takes a multiple of the width
+                    Value::Imm(n) if n % width == 0 && (0..4096).contains(&(n / width)) => {
+                        format!("[{base}, #{n}]")
+                    }
                     _ => format!("[{base}, {}]", self.base(index, "x11")),
                 };
                 let target = self.target(dst);
-                // a byte load into the low half clears the rest
-                self.emit(&format!("\tldrb\tw{}, {byte}", &target[1..]));
+                // a narrower load into the low half clears the rest
+                let low = &target[1..];
+                match width {
+                    1 => self.emit(&format!("\tldrb\tw{low}, {byte}")),
+                    2 => self.emit(&format!("\tldrh\tw{low}, {byte}")),
+                    4 => self.emit(&format!("\tldr\tw{low}, {byte}")),
+                    _ => self.emit(&format!("\tldr\t{target}, {byte}")),
+                }
                 self.store(dst, target);
             }
 

@@ -22,9 +22,27 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - The benchmarks have Rust versions: an idiomatic, safe one for each, and a tuned one for
   `binary_trees`, `matmul`, `matmul_float`, `strings`, and `wordcount`, timed beside C when
   `rustc` is on `PATH`.
+- `byte(n)` gives `bytes` of the one byte `n`, stopping the program outside 0-255, so
+  `out += byte(n)` appends a byte without a list or a result. Compiled, it returns an immortal
+  value from a table and allocates nothing.
+- `b.u16_le(i)`, `b.u32_le(i)`, and `b.u64_le(i)` read 2, 4, or 8 bytes from `i` on as a
+  little-endian int (`u64_le` wrapping to a negative one), stopping the program with
+  `u32_le index out of range (index 5, length 8)` when the read does not fit. Compiled, each is
+  one unaligned load after one check.
+- `n.trailing_zeros()` and `n.leading_zeros()` count an int's zero bits below its lowest set bit
+  or above its highest, over 64 bits (64 for 0). Compiled, each is `tzcnt`/`lzcnt` at x86-64
+  `v3`, `bsf`/`bsr` before, and `rbit`/`clz` on arm64, and constants fold.
 
 ### Changed
 
+- Compiled slices with a step of 1 skip a division, and the runtime copies strings and bytes a
+  word at a time rather than a byte at a time, so short slices, sums, and appends are faster.
+- A `str` or `bytes` parameter that a sum starts from as the whole value of a `ret` or an
+  assignment (`ret out + x`) is owned, so a caller passing it at its last use moves it in and the
+  sum appends in place, rather than copying the whole value on every call.
+- Compiled, `out += src[a:b]` (or `out = out + src[a:b]`) on bytes copies the slice straight onto
+  `out` without making it first, in place when nothing else refers to `out`, so decompressors that
+  copy runs of their input no longer allocate per run.
 - Compiled code removes checks that facts about its values prove never fail: an index from 0 to
   below its list's length (by a `while` loop's test as well as a `range`, and into a list of
   structs, as in `for j in range(i + 1, n)`, or into a list a loop of appends built, which is as

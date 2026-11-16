@@ -1,0 +1,17 @@
+// u16_le, u32_le, and u64_le read little-endian ints from bytes
+data = b"\x01\x02\x03\x04\x05\x06\x07\x08\xff\xff\xff\xff\xff\xff\xff\xff"
+print(data.u16_le(0), data.u32_le(0), data.u64_le(0))
+print(data.u16_le(7), data.u32_le(5), data.u64_le(8))
+print(data.u16_le(14), data.u32_le(12), data.u64_le(4))
+print(b"\x00\x00\x00\x80".u32_le(0), b"\x00\x00\x00\x00\x00\x00\x00\x80".u64_le(0))
+
+fn checksum(b: bytes) -> int:
+    total = 0
+    for i in range(b.len() - 7):
+        total = total ^ b.u64_le(i) ^ b.u32_le(i) ^ b.u16_le(i + 6)
+    ret total
+
+print(checksum(data), checksum("the quick brown fox".bytes()))
+// equal words compare as one read
+word = "abcdabcd".bytes()
+print(word.u32_le(0) == word.u32_le(4), word.u32_le(0) == word.u32_le(1))

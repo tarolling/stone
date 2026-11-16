@@ -326,6 +326,11 @@ pub(super) fn rename_inst(
             dst: reg(dst),
             src: o(src),
         },
+        Inst::BitCount { dst, src, leading } => Inst::BitCount {
+            dst: reg(dst),
+            src: o(src),
+            leading,
+        },
         Inst::Compare {
             cond,
             float,
@@ -366,10 +371,16 @@ pub(super) fn rename_inst(
             dst: reg(dst),
             text: o(text),
         },
-        Inst::StrByte { dst, text, index } => Inst::StrByte {
+        Inst::StrByte {
+            dst,
+            text,
+            index,
+            width,
+        } => Inst::StrByte {
             dst: reg(dst),
             text: o(text),
             index: o(index),
+            width,
         },
         Inst::ListLoad { dst, list, index } => Inst::ListLoad {
             dst: reg(dst),

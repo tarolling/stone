@@ -1037,7 +1037,7 @@ fn a_tuple_parameter_is_passed_as_its_values() {
 
 #[test]
 fn a_local_returned_twice_gives_one_reference_and_retains_the_other() {
-    let source = "fn twice(s: str) -> tuple[str, str]:\n    t = s + \"!\"\n    ret (t, t)\n\
+    let source = "fn twice(s: str) -> tuple[str, str]:\n    t = \"!\" + s\n    ret (t, t)\n\
                   print(twice(\"a\"))\n";
     let ir = dump(source);
     let twice = ir.split("fn main").next().unwrap();
@@ -1698,7 +1698,7 @@ fn a_closure_holds_its_copies_and_its_code_finds_them() {
 
 #[test]
 fn a_closure_takes_a_variable_at_its_last_use() {
-    let source = "fn prefixed(p: str) -> fn(str) -> str:\n    q = p + \"-\"\n    \
+    let source = "fn prefixed(p: str) -> fn(str) -> str:\n    q = \"-\" + p\n    \
                   ret |s: str| q + s\nf = prefixed(\"a\")\nprint(f(\"b\"))\n";
     let program = lower_source(source);
     let prefixed = program
@@ -2046,6 +2046,25 @@ fn a_byte_of_bytes_is_read_inline() {
 }
 
 #[test]
+fn a_little_endian_read_is_one_load_after_one_range_check() {
+    let text = dump("fn f(b: bytes, i: int) -> int:\n    ret b.u32_le(i)\n");
+    assert!(text.contains("bytes_load4 v0, v1"), "{text}");
+    assert!(text.contains("sub"), "{text}");
+    assert!(!text.contains("call"), "{text}");
+    let text = dump("fn f(b: bytes) -> int:\n    ret b.u64_le(0) + b.u16_le(8)\n");
+    assert!(text.contains("bytes_load8 v0, 0"), "{text}");
+    assert!(text.contains("bytes_load2 v0, 8"), "{text}");
+}
+
+#[test]
+fn a_bit_count_is_one_instruction() {
+    let text = dump("fn f(n: int) -> int:\n    ret n.trailing_zeros() + n.leading_zeros()\n");
+    assert!(text.contains("trailing_zeros v0"), "{text}");
+    assert!(text.contains("leading_zeros v0"), "{text}");
+    assert!(!text.contains("call"), "{text}");
+}
+
+#[test]
 fn appending_to_a_string_variable_moves_it_into_the_append() {
     // the variable, the target of its own append, gives its reference to `stone.str_append`
     let text = dump(
@@ -2055,11 +2074,53 @@ fn appending_to_a_string_variable_moves_it_into_the_append() {
     assert!(!text.contains("stone.str_concat"), "{text}");
     // so does a temporary, through a chain of `+`
     let text = dump("fn f(a: str, b: str) -> str:\n    ret a + b + \"!\" + b\n");
-    assert_eq!(text.matches("call stone.str_concat(").count(), 1, "{text}");
-    assert_eq!(text.matches("call stone.str_append(").count(), 2, "{text}");
+    assert_eq!(text.matches("call stone.str_append(").count(), 3, "{text}");
+    assert!(!text.contains("stone.str_concat"), "{text}");
     // but a variable read again later is only borrowed
-    let text = dump("fn f(s: str) -> str:\n    t = s + \"!\"\n    ret s + t\n");
-    assert!(!text.contains("stone.str_append"), "{text}");
+    let text = dump("fn f(s: str) -> str:\n    t = s + \"!\"\n    u = t + s\n    ret u + t\n");
+    assert_eq!(text.matches("call stone.str_concat(").count(), 2, "{text}");
+}
+
+#[test]
+fn a_parameter_a_sum_starts_from_at_its_last_use_is_owned() {
+    // `ret out + x` takes the caller's buffer, so building one through calls copies nothing
+    let source = "fn add(out: bytes, x: bytes) -> bytes:\n    ret out + x\n\
+                  fn g(n: int) -> bytes:\n    out = b\"\"\n    for _i in range(n):\n        \
+                  out = add(out, b\"ab\")\n    ret out\n";
+    let text = dump(source);
+    assert!(text.contains("call stone.str_append("), "{text}");
+    assert!(!text.contains("stone.str_concat"), "{text}");
+    // so is one assigned the sum
+    let text = dump("fn f(s: str) -> str:\n    t = s + \"!\"\n    ret t\n");
+    assert!(!text.contains("stone.str_concat"), "{text}");
+}
+
+#[test]
+fn appending_a_slice_of_bytes_copies_it_onto_the_sum_without_making_it() {
+    let source = "fn f(out: bytes, src: bytes, i: int) -> bytes:\n    out += src[i:i + 4]\n    \
+                  out += src[:2]\n    ret out\n";
+    let text = dump(source);
+    assert_eq!(
+        text.matches("call stone.bytes_append_slice(").count(),
+        2,
+        "{text}"
+    );
+    assert!(!text.contains("stone.bytes_slice_of"), "{text}");
+    // a sum something else still reads is retained, so the routine copies it
+    let text =
+        dump("fn f(out: bytes, src: bytes) -> bytes:\n    t = out + src[1:2]\n    ret out + t\n");
+    assert!(
+        text.contains("retain v0\n  v3 = call stone.bytes_append_slice(v0, v1, 1, 2, 4)"),
+        "{text}"
+    );
+    // a step and a slice among other pieces keep the slice
+    for source in [
+        "fn f(out: bytes, src: bytes) -> bytes:\n    out += src[::2]\n    ret out\n",
+        "fn f(out: bytes, src: bytes) -> bytes:\n    out = out + src[1:2] + src\n    ret out\n",
+    ] {
+        let text = dump(source);
+        assert!(!text.contains("stone.bytes_append_slice"), "{text}");
+    }
 }
 
 #[test]

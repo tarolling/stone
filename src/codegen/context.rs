@@ -63,6 +63,7 @@ pub const STRING_METHOD_ROUTINES: &[&str] = &[
     "stone.str_rposition",
     "stone.str_count",
     "stone.str_replace",
+    "stone.byte_value",
 ];
 
 /// The routines of `bytes` that differ from strings', emitted only when called (see
@@ -72,6 +73,7 @@ pub const BYTES_ROUTINES: &[&str] = &[
     "stone.bytes_cmp",
     "stone.bytes_find",
     "stone.bytes_slice_of",
+    "stone.bytes_append_slice",
     "stone.bytes_check",
     "stone.bytes_from_list",
     "stone.gui_pack",
@@ -94,6 +96,7 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.str_starts",
     "stone.str_ends",
     "stone.str_char",
+    "stone.byte_value",
     "stone.input",
     "stone.args",
     "stone.os_env",

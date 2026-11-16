@@ -96,6 +96,9 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if uses("stone.bytes_slice_of") {
         slice_of(r#gen);
     }
+    if uses("stone.bytes_append_slice") {
+        append_slice(r#gen);
+    }
     if uses("stone.bytes_check") {
         // x9 holds the count, x10 the values, and x11 the position
         r#gen.emit("stone.bytes_check:");
@@ -381,6 +384,92 @@ fn slice_of(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lbytes_slice_of_copied:");
     r#gen.emit("\tmov\tx0, x23");
     r#gen.emit(".Lbytes_slice_of_end:");
+    pop_frame(r#gen, &saved);
+}
+
+/// Emits `stone.bytes_append_slice`, as `x64::bytes` does: the sum in `x0`, owned, the source in
+/// `x1`, borrowed, the bounds in `x2` and `x3`, and which are missing in `x4`.
+fn append_slice(r#gen: &mut dyn AssemblyGenerator) {
+    // x23 holds the sum, x19 the source (0 while it is the sum's block being moved), x20 the
+    // first index, x22 the count, and x24 the sum's length
+    let saved = ["x19", "x20", "x21", "x22", "x23", "x24"];
+    r#gen.emit("stone.bytes_append_slice:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx23, x0");
+    r#gen.emit("\tmov\tx19, x1");
+    r#gen.emit("\tldur\tx9, [x1, #-16]");
+    r#gen.emit("\tmov\tx1, x2");
+    r#gen.emit("\tmov\tx2, x3");
+    r#gen.emit("\torr\tx4, x4, #4");
+    super::builtins::slice_bounds(r#gen, "bytes_append_slice");
+    r#gen.emit("\tmov\tx0, x23");
+    r#gen.emit("\tcbz\tx22, .Lbytes_append_slice_end");
+    r#gen.emit("\tldur\tx24, [x23, #-16]");
+    r#gen.emit("\tldur\tx9, [x23, #-8]");
+    r#gen.emit("\tcmp\tx9, #1");
+    r#gen.emit("\tb.ne\t.Lbytes_append_slice_copy");
+    // the bytes the sum needs, and those its block holds, as in `stone.str_append`
+    r#gen.emit("\tadd\tx1, x24, x22");
+    r#gen.emit("\tadd\tx1, x1, #17");
+    r#gen.emit("\tsub\tx0, x23, #16");
+    r#gen.emit("\tldur\tx9, [x0, #-8]");
+    r#gen.emit("\tmov\tx10, x9");
+    r#gen.emit(&format!(
+        "\tcmp\tx9, #{}",
+        crate::codegen::context::LARGEST_CLASS
+    ));
+    r#gen.emit("\tb.hi\t.Lbytes_append_slice_room");
+    r#gen.emit("\tmov\tx10, #1");
+    r#gen.emit("\tlsl\tx10, x10, x9");
+    r#gen.emit(".Lbytes_append_slice_room:");
+    r#gen.emit("\tsub\tx10, x10, #8");
+    r#gen.emit("\tcmp\tx1, x10");
+    r#gen.emit("\tb.ls\t.Lbytes_append_slice_write");
+    r#gen.emit("\tadd\tx10, x10, x10");
+    r#gen.emit("\tcmp\tx1, x10");
+    r#gen.emit("\tcsel\tx1, x1, x10, hs");
+    // growing may move the block, and the source with it if it is the sum
+    r#gen.emit("\tcmp\tx19, x23");
+    r#gen.emit("\tb.ne\t.Lbytes_append_slice_grow");
+    r#gen.emit("\tmov\tx19, #0");
+    r#gen.emit(".Lbytes_append_slice_grow:");
+    r#gen.emit("\tbl\tstone.mem_realloc");
+    r#gen.emit("\tadd\tx23, x0, #16");
+    r#gen.emit("\tcbnz\tx19, .Lbytes_append_slice_write");
+    r#gen.emit("\tmov\tx19, x23");
+    r#gen.emit(".Lbytes_append_slice_write:");
+    r#gen.emit("\tadd\tx9, x23, x24");
+    r#gen.emit("\tadd\tx11, x19, x20");
+    r#gen.emit("\tmov\tx10, x22");
+    super::builtins::copy_bytes(r#gen, "x9", "x11", "x10", ".Lbytes_append_slice_bytes");
+    r#gen.emit("\tstrb\twzr, [x9]");
+    r#gen.emit("\tadd\tx24, x24, x22");
+    r#gen.emit("\tstur\tx24, [x23, #-16]");
+    r#gen.emit("\tmov\tx0, x23");
+    r#gen.emit("\tb\t.Lbytes_append_slice_end");
+    // something else refers to the sum, so the sum and the slice go into new bytes
+    r#gen.emit(".Lbytes_append_slice_copy:");
+    r#gen.emit("\tadd\tx20, x19, x20");
+    r#gen.emit("\tadd\tx0, x24, x22");
+    r#gen.emit("\tbl\tstone.str_new");
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx9, x0");
+    r#gen.emit("\tmov\tx11, x23");
+    r#gen.emit("\tmov\tx10, x24");
+    super::builtins::copy_bytes(r#gen, "x9", "x11", "x10", ".Lbytes_append_slice_old");
+    r#gen.emit("\tmov\tx11, x20");
+    r#gen.emit("\tmov\tx10, x22");
+    super::builtins::copy_bytes(r#gen, "x9", "x11", "x10", ".Lbytes_append_slice_new");
+    r#gen.emit("\tstrb\twzr, [x9]");
+    r#gen.emit("\tldur\tx9, [x23, #-8]");
+    r#gen.emit("\tsub\tx9, x9, #1");
+    r#gen.emit("\tstur\tx9, [x23, #-8]");
+    r#gen.emit("\tcbnz\tx9, .Lbytes_append_slice_kept");
+    r#gen.emit("\tmov\tx9, x23");
+    r#gen.emit("\tbl\tstone.free_str");
+    r#gen.emit(".Lbytes_append_slice_kept:");
+    r#gen.emit("\tmov\tx0, x19");
+    r#gen.emit(".Lbytes_append_slice_end:");
     pop_frame(r#gen, &saved);
 }
 

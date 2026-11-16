@@ -156,6 +156,28 @@ fn read_number() -> result[int, str]:
 print(read_number())   // ok(42) for the line 42, err('end of input') with no input
 ```
 
+## `byte`
+
+```text
+byte(value: int) -> bytes
+```
+
+Returns `bytes` of the one byte `value`, stopping the program with `byte out of range (value N)`
+unless `value` is from 0 to 255. It appends a single byte without making a list or a result, and
+compiled it allocates nothing:
+
+```stone
+fn varint(n: int) -> bytes:
+    out = b""
+    v = n
+    while v >= 128:
+        out += byte(v % 128 + 128)
+        v = v / 128
+    ret out + byte(v)
+
+print(varint(300))   // b'\xac\x02'
+```
+
 ## `eof`
 
 ```text
@@ -614,6 +636,25 @@ cannot hold, or `err("not valid UTF-8 text")`.
 print(b"caf\xc3\xa9".text(), b"\xff".text())   // ok('café') err('not valid UTF-8 text')
 ```
 
+### `u16_le`, `u32_le`, `u64_le`
+
+```text
+bytes.u16_le(index: int) -> int
+bytes.u32_le(index: int) -> int
+bytes.u64_le(index: int) -> int
+```
+
+Returns the 2, 4, or 8 bytes from `index` on as a little-endian int. The first two are never
+negative, and `u64_le` wraps to a negative int when its last byte is 128 or more. A negative
+index never counts from the end, and a read that does not fit in the bytes stops the program
+with `u32_le index out of range (index 5, length 8)`. Compiled, each is one load after one
+check, so comparing four bytes at once is `a.u32_le(i) == a.u32_le(j)`.
+
+```stone
+data = b"\x01\x02\x03\x04\x05\x06\x07\x08"
+print(data.u16_le(0), data.u32_le(4), data.u64_le(0))   // 513 134678021 578437695752307201
+```
+
 ### `is_some`
 
 ```text
@@ -997,6 +1038,22 @@ returned as it is, and a float that is `nan` or does not fit in an int stops the
 
 ```stone
 print((-2.5).floor(), 2.5.floor(), 7.floor())   // -3 2 7
+```
+
+### `trailing_zeros`, `leading_zeros`
+
+```text
+int.trailing_zeros() -> int
+int.leading_zeros() -> int
+```
+
+Count the zero bits below the lowest set bit, or above the highest, of the int's 64 bits, so
+both give 64 for 0 and a negative int has no leading zeros. Compiled, each is one or a few
+instructions (`tzcnt` and `lzcnt` at x86-64 `v3`, `rbit` and `clz` on arm64), so the number of
+equal bytes at the start of two 8-byte reads is `(a ^ b).trailing_zeros() / 8`.
+
+```stone
+print(40.trailing_zeros(), 40.leading_zeros(), 0.trailing_zeros())   // 3 58 64
 ```
 
 ### `display`

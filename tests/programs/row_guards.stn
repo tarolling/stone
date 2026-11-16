@@ -1,0 +1,43 @@
+// loop nests reading rows of lists the function never changes, which run unchecked behind one
+// test of the rows' lengths and must compute exactly what checked code does
+fn multiply(a: list[list[int]], b: list[list[int]], n: int, m: int, p: int) -> list[list[int]]:
+    c = []
+    for i in range(n):
+        row = []
+        for j in range(p):
+            total = 0
+            for k in range(m):
+                total += a[i][k] * b[k][j]
+            row.append(total)
+        c.append(row)
+    ret c
+
+// a row read through a variable of its own
+fn column_sums(rows: list[list[float]], n: int, width: int) -> list[float]:
+    sums = []
+    for j in range(width):
+        t = 0.0
+        for i in range(n):
+            row = rows[i]
+            t += row[j]
+        sums.append(t)
+    ret sums
+
+// rows longer than the nest reads, past the ones it reads
+fn corner(rows: list[list[int]], size: int) -> int:
+    t = 0
+    for i in range(size):
+        for j in range(size):
+            t += rows[i][j] * (i + 1)
+    ret t
+
+a = [[1, 2, 3], [4, 5, 6]]
+b = [[7, 8], [9, 10], [11, 12]]
+print(multiply(a, b, 2, 3, 2))
+print(multiply([[2, 0], [0, 2]], [[1, 2], [3, 4]], 2, 2, 2))
+print(column_sums([[1.5, 2.0], [0.5, 4.0], [1.0, -1.0]], 3, 2))
+print(corner([[1, 2, 3, 4], [5, 6, 7], [8, 9], [10]], 2))
+// ragged rows, the short ones past those the nest reads, which the guard does not measure
+print(corner([[1, 2], [3], [4, 5, 6]], 1))
+// a nest that never runs finds a row too short and runs the checked nest, which fails nothing
+print(multiply([], [[1], []], 0, 2, 2))

@@ -30,6 +30,7 @@ use super::{
 };
 use crate::codegen::ir::Callee;
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 /// More elements than any list can hold, far more than memory allows, so that adding a small
 /// constant to a number of elements never overflows.
@@ -56,6 +57,9 @@ enum Term {
     Reg(VReg),
     /// The number of elements of the list in the vreg, whose elements are this many slots each.
     Len(VReg, usize),
+    /// The fewest slots of the lists that are the first elements of the list in the vreg, as
+    /// many as [`State::rows`] says, which an [`Inst::MinRowLen`] measured.
+    Rows(VReg),
 }
 
 impl Term {
@@ -68,7 +72,15 @@ impl Term {
     }
 
     fn mentions(self, reg: VReg) -> bool {
-        matches!(self, Term::Reg(r) | Term::Len(r, _) if r == reg)
+        matches!(self, Term::Reg(r) | Term::Len(r, _) | Term::Rows(r) if r == reg)
+    }
+
+    /// Returns the list whose length or rows the term is about, if it is about one.
+    fn list(self) -> Option<VReg> {
+        match self {
+            Term::Len(r, _) | Term::Rows(r) => Some(r),
+            _ => None,
+        }
     }
 }
 
@@ -79,6 +91,11 @@ struct State {
     bounds: HashMap<(Term, Term), i128>,
     /// The vregs holding floats that are never below zero: at least zero, `-0.0`, or nan.
     not_negative: HashSet<VReg>,
+    /// For each list a [`Term::Rows`] is about, how many of its first elements were measured.
+    rows: HashMap<VReg, Operand>,
+    /// The function's lists that nothing changes while it runs (see [`frozen`]), the same at
+    /// every point.
+    frozen: Rc<HashSet<VReg>>,
 }
 
 impl State {
@@ -102,12 +119,40 @@ impl State {
         self.bounds
             .retain(|(x, y), _| !x.mentions(reg) && !y.mentions(reg));
         self.not_negative.remove(&reg);
+        self.rows
+            .retain(|&list, count| list != reg && *count != Operand::Reg(reg));
     }
 
-    /// Forgets every list's number of elements, which a call may change.
-    fn kill_lengths(&mut self) {
-        self.bounds
-            .retain(|(x, y), _| !matches!(x, Term::Len(..)) && !matches!(y, Term::Len(..)));
+    /// Forgets every list's number of elements and rows, which a call may change, except those
+    /// of frozen lists when `keep_frozen`.
+    fn kill_lengths(&mut self, keep_frozen: bool) {
+        let frozen = Rc::clone(&self.frozen);
+        let kept = |t: &Term| t.list().is_none_or(|r| keep_frozen && frozen.contains(&r));
+        self.bounds.retain(|(x, y), _| kept(x) && kept(y));
+        self.rows
+            .retain(|list, _| keep_frozen && frozen.contains(list));
+    }
+
+    /// Forgets what is known of the rows of every list but frozen ones, since a store may put a
+    /// new row in a list another vreg also holds.
+    fn kill_rows(&mut self) {
+        let frozen = Rc::clone(&self.frozen);
+        let kept = |t: &Term| !matches!(t, Term::Rows(r) if !frozen.contains(r));
+        self.bounds.retain(|(x, y), _| kept(x) && kept(y));
+        self.rows.retain(|list, _| frozen.contains(list));
+    }
+
+    /// Returns whether a call leaves frozen lists' lengths and rows alone: a stone function,
+    /// which changes only what it owns, and nothing frozen is ever given away, or a runtime
+    /// routine on lists, which changes only its first argument, made unique first.
+    fn keeps_frozen(&self, callee: &Callee, args: &[Operand]) -> bool {
+        match callee {
+            Callee::User(_) | Callee::Helper(_) | Callee::Value(_) | Callee::Print(_) => true,
+            Callee::Runtime(name) => {
+                name.starts_with("stone.list_")
+                    && !matches!(args.first(), Some(Operand::Reg(r)) if self.frozen.contains(r))
+            }
+        }
     }
 
     /// Returns the least `c` the bounds prove `from - to <= c` for, or `None` if they prove
@@ -147,7 +192,7 @@ impl State {
                     edges.push((i, zero, i64::MAX as i128));
                     edges.push((zero, i, -(i64::MIN as i128)));
                 }
-                Term::Len(..) => {
+                Term::Len(..) | Term::Rows(_) => {
                     edges.push((i, zero, MAX_LEN));
                     edges.push((zero, i, 0));
                 }
@@ -457,7 +502,7 @@ impl State {
                 ref args,
             } if dsts.len() == 1 && !args.is_empty() => {
                 let dst = dsts[0];
-                self.kill_lengths();
+                self.kill_lengths(true);
                 self.kill(dst);
                 let (t, k) = Term::of(args[0]);
                 if !matches!(t, Term::Reg(r) if r == dst) {
@@ -478,7 +523,7 @@ impl State {
                 // included, since the way into a loop of appends often knows `len == 0` and
                 // `i == 0` but not `len == i`
                 let len = Term::Len(list, 1);
-                let other = |t: &Term| t != &len && !matches!(t, Term::Len(..));
+                let other = |t: &Term| t != &len && t.list().is_none();
                 let mut kept = Vec::new();
                 if let (Some(out), Some(back)) = (
                     self.distances(len, len, false),
@@ -495,14 +540,64 @@ impl State {
                         }
                     }
                 }
-                self.kill_lengths();
+                let keep = self.keeps_frozen(&Callee::Runtime("stone.list_append"), args);
+                self.kill_lengths(keep);
                 for (x, y, c) in kept {
                     self.add(x, y, c);
                 }
             }
-            Inst::Call { ref dsts, .. } => {
-                self.kill_lengths();
+            Inst::Call {
+                ref dsts,
+                ref callee,
+                ref args,
+            } => {
+                let keep = self.keeps_frozen(callee, args);
+                self.kill_lengths(keep);
                 for &dst in dsts {
+                    self.kill(dst);
+                }
+            }
+            // the guard before a loop nest measured the first `count` rows
+            Inst::MinRowLen {
+                dst,
+                list: Operand::Reg(list),
+                count,
+            } if count != Operand::Reg(dst) && list != dst => {
+                self.kill(dst);
+                self.bounds
+                    .retain(|(x, y), _| *x != Term::Rows(list) && *y != Term::Rows(list));
+                self.equal(Term::Reg(dst), Term::Rows(list), 0);
+                self.rows.insert(list, count);
+            }
+            // a row read from below the measured count is at least as long as the shortest
+            Inst::ListLoad {
+                dst,
+                list: Operand::Reg(list),
+                index,
+            }
+            | Inst::ListGet {
+                dst,
+                list: Operand::Reg(list),
+                index,
+                offset: 0,
+            } if list != dst => {
+                let measured = self.rows.get(&list).copied().is_some_and(|count| {
+                    let (t, k) = Term::of(index);
+                    let (c, m) = Term::of(count);
+                    // 0 <= index + k < count + m
+                    self.holds(Term::Zero, t, k) && self.holds(t, c, m - k - 1)
+                });
+                self.kill(dst);
+                if measured {
+                    self.add(Term::Rows(list), Term::Len(dst, 1), 0);
+                }
+            }
+            Inst::ListStore { .. }
+            | Inst::ListSet { .. }
+            | Inst::DataSet { .. }
+            | Inst::ListInit { .. } => {
+                self.kill_rows();
+                for dst in inst.defs() {
                     self.kill(dst);
                 }
             }
@@ -599,9 +694,17 @@ impl State {
             .intersection(&other.not_negative)
             .copied()
             .collect();
+        let rows = self
+            .rows
+            .iter()
+            .filter(|(list, count)| other.rows.get(list) == Some(count))
+            .map(|(&list, &count)| (list, count))
+            .collect();
         State {
             bounds,
             not_negative,
+            rows,
+            frozen: Rc::clone(&self.frozen),
         }
     }
 }
@@ -657,7 +760,10 @@ fn analyze(function: &Function) -> Option<Vec<Option<State>>> {
     let count = function.blocks.len();
     let preds = predecessors(function);
     let mut entry: Vec<Option<State>> = vec![None; count];
-    entry[0] = Some(State::default());
+    entry[0] = Some(State {
+        frozen: Rc::new(frozen(function)),
+        ..State::default()
+    });
     // the facts on each way from a block to another
     let mut edges: HashMap<(usize, usize), State> = HashMap::new();
     let mut changes = vec![0; count];
@@ -700,6 +806,65 @@ fn analyze(function: &Function) -> Option<Vec<Option<State>>> {
         }
     }
     Some(entry)
+}
+
+/// Returns the lists that nothing changes while the function runs: the parameters it never
+/// writes, and what it only ever copies or loads from such a list, or sets to no list at all.
+///
+/// stone has value semantics, so a parameter the function never writes is one it borrows: its
+/// caller holds the list, and every list inside it, which nothing can change in place, since a
+/// change makes a list unique first, copying one that anything else also holds. A runtime
+/// routine changes only the list it is given first, which lowering made unique.
+///
+/// For example, in `fn f(b: list[list[int]])`, `b` and every `row = b[k]` are frozen.
+pub(super) fn frozen(function: &Function) -> HashSet<VReg> {
+    let mut defs: HashMap<VReg, Vec<&Inst>> = HashMap::new();
+    for block in &function.blocks {
+        for inst in &block.insts {
+            for dst in inst.defs() {
+                defs.entry(dst).or_default().push(inst);
+            }
+        }
+    }
+    let mut frozen: HashSet<VReg> = function
+        .params
+        .iter()
+        .copied()
+        .filter(|p| !defs.contains_key(p))
+        .collect();
+    loop {
+        let more: Vec<VReg> = defs
+            .iter()
+            .filter(|(reg, _)| !frozen.contains(reg))
+            .filter(|(_, insts)| {
+                insts.iter().all(|inst| match inst {
+                    Inst::Copy {
+                        src: Operand::Reg(r),
+                        ..
+                    }
+                    | Inst::ListLoad {
+                        list: Operand::Reg(r),
+                        ..
+                    }
+                    | Inst::ListGet {
+                        list: Operand::Reg(r),
+                        ..
+                    } => frozen.contains(r),
+                    // a variable starts out holding no list, which nothing can change either
+                    Inst::Copy {
+                        src: Operand::Imm(0),
+                        ..
+                    } => true,
+                    _ => false,
+                })
+            })
+            .map(|(&reg, _)| reg)
+            .collect();
+        if more.is_empty() {
+            return frozen;
+        }
+        frozen.extend(more);
+    }
 }
 
 /// Returns whether `index` is proven to be an element of `list`, whose elements are `width` slots
@@ -1048,5 +1213,107 @@ mod tests {
                 met.bounds
             );
         }
+    }
+
+    /// Returns facts in which `lists` are frozen.
+    fn frozen_state(lists: &[u32]) -> State {
+        State {
+            frozen: Rc::new(lists.iter().map(|&n| VReg(n)).collect()),
+            ..State::default()
+        }
+    }
+
+    #[test]
+    fn a_frozen_list_keeps_its_length_across_calls() {
+        let mut state = frozen_state(&[0]);
+        state.step(&Inst::ListLen {
+            dst: VReg(1),
+            list: Operand::Reg(VReg(0)),
+        });
+        state.add(r(2), r(1), -1);
+        // appending to another list, or calling a stone function, changes no frozen list
+        for callee in [
+            Callee::Runtime("stone.list_append"),
+            Callee::User("f".to_string()),
+        ] {
+            state.step(&Inst::Call {
+                dsts: vec![],
+                callee,
+                args: vec![Operand::Reg(VReg(5)), Operand::Imm(1)],
+            });
+            assert!(
+                state.holds(r(2), Term::Len(VReg(0), 1), -1),
+                "{:?}",
+                state.bounds
+            );
+        }
+        // a routine not on lists may change anything
+        state.step(&Inst::Call {
+            dsts: vec![],
+            callee: Callee::Runtime("stone.map_compact"),
+            args: vec![Operand::Reg(VReg(5))],
+        });
+        assert!(
+            !state.holds(r(2), Term::Len(VReg(0), 1), -1),
+            "{:?}",
+            state.bounds
+        );
+    }
+
+    #[test]
+    fn a_row_read_below_the_measured_count_is_at_least_the_shortest() {
+        let mut state = frozen_state(&[0]);
+        // v3 = min_row_len v0, v2, and the guard took the way where v4 <= v3
+        state.step(&Inst::MinRowLen {
+            dst: VReg(3),
+            list: Operand::Reg(VReg(0)),
+            count: Operand::Reg(VReg(2)),
+        });
+        state.assume(Cond::Le, Operand::Reg(VReg(4)), Operand::Reg(VReg(3)));
+        // 0 <= v5 < v2 and 0 <= v6 < v4
+        for (index, bound) in [(5, 2), (6, 4)] {
+            state.assume(Cond::Ge, Operand::Reg(VReg(index)), Operand::Imm(0));
+            state.assume(
+                Cond::Lt,
+                Operand::Reg(VReg(index)),
+                Operand::Reg(VReg(bound)),
+            );
+        }
+        let load = |dst, index| Inst::ListLoad {
+            dst: VReg(dst),
+            list: Operand::Reg(VReg(0)),
+            index: Operand::Reg(VReg(index)),
+        };
+        state.step(&load(7, 5));
+        assert!(in_range(
+            &state,
+            Operand::Reg(VReg(7)),
+            Operand::Reg(VReg(6)),
+            1
+        ));
+        // a row from past the measured ones may be shorter
+        state.step(&load(8, 4));
+        assert!(!in_range(
+            &state,
+            Operand::Reg(VReg(8)),
+            Operand::Reg(VReg(6)),
+            1
+        ));
+        // a store may put a shorter row in a list that is not frozen
+        let mut thawed = state.clone();
+        thawed.frozen = Rc::new(HashSet::new());
+        thawed.step(&Inst::ListStore {
+            old: None,
+            list: Operand::Reg(VReg(9)),
+            index: Operand::Imm(0),
+            value: Operand::Imm(0),
+        });
+        thawed.step(&load(10, 5));
+        assert!(!in_range(
+            &thawed,
+            Operand::Reg(VReg(10)),
+            Operand::Reg(VReg(6)),
+            1
+        ));
     }
 }

@@ -68,6 +68,7 @@ mod facts;
 mod fold;
 mod licm;
 mod ranges;
+mod rows;
 
 use super::inline::{rename_inst, retarget};
 use super::{
@@ -117,6 +118,7 @@ pub fn optimize_with(program: &mut Program, options: Options) {
             | dead::remove_dead_loops(function)
             | cfg::simplify_cfg(function)
         {}
+        while rows::guard_rows(function) {}
         if facts::remove_proven_checks(function, options) {
             while cfg::simplify_cfg(function) | dead::remove_dead(function) {}
         }
@@ -124,6 +126,7 @@ pub fn optimize_with(program: &mut Program, options: Options) {
         while counters::coalesce_counters(function) {}
         rotate_loops(function);
         hoist_data(function);
+        expand_rows(function);
         if options.verify {
             never_counted_from_end(function);
             expand_never(function);
@@ -208,6 +211,175 @@ fn never_counted_from_end(function: &mut Function) {
             }
             at += 1;
         }
+    }
+}
+
+/// Turns each [`Inst::MinRowLen`] into a loop over the rows it measures: the block ends at it
+/// with a test that skips the loop for a count of at most 0, the first row's length starts the
+/// least, and each later one shorter takes its place, as in
+///
+/// ```text
+///   v5 = copy 0
+///   br_le v2, 0 -> b4, b1
+/// b1:
+///   v6 = list_get v1, 0
+///   v5 = len v6
+///   v7 = copy 1
+///   jmp b2
+/// b2:
+///   br_lt v7, v2 -> b3, b5
+/// b3:
+///   v6 = list_get v1, v7
+///   v8 = len v6
+///   v7 = add v7, 1
+///   br_lt v8, v5 -> b4, b2
+/// b4:
+///   v5 = copy v8
+///   jmp b2
+/// ```
+///
+/// with the rest of the block after it. The rows are read unchecked, since the guard tested that
+/// the list has as many first.
+pub fn expand_rows(function: &mut Function) {
+    let measures = |block: &Block| {
+        block
+            .insts
+            .iter()
+            .filter(|inst| matches!(inst, Inst::MinRowLen { .. }))
+            .count()
+    };
+    if function.blocks.iter().all(|block| measures(block) == 0) {
+        return;
+    }
+    // blocks each measure adds before the rest of its block
+    const ADDED: usize = 5;
+    let old = std::mem::take(&mut function.blocks);
+    let mut first = Vec::with_capacity(old.len());
+    let mut count = 0;
+    for block in &old {
+        first.push(count);
+        count += 1 + ADDED * measures(block);
+    }
+    for block in old {
+        let mut insts = Vec::new();
+        let mut spans = Vec::new();
+        for (inst, span) in block.insts.into_iter().zip(block.spans) {
+            let Inst::MinRowLen { dst, list, count } = inst else {
+                insts.push(inst);
+                spans.push(span);
+                continue;
+            };
+            let at = function.blocks.len();
+            let [start, head, body, shorter, rest] = [1, 2, 3, 4, 5].map(|i| BlockId(at + i));
+            let row = VReg(function.vreg_count);
+            let index = VReg(function.vreg_count + 1);
+            let length = VReg(function.vreg_count + 2);
+            function.vreg_count += 3;
+            let depth = block.loop_depth;
+            let mut before = std::mem::take(&mut insts);
+            let mut before_spans = std::mem::take(&mut spans);
+            before.push(Inst::Copy {
+                dst,
+                src: Operand::Imm(0),
+            });
+            before_spans.push(span);
+            function.blocks.push(Block {
+                insts: before,
+                spans: before_spans,
+                term: Terminator::CmpBranch {
+                    cond: Cond::Le,
+                    float: false,
+                    lhs: count,
+                    rhs: Operand::Imm(0),
+                    then: rest,
+                    otherwise: start,
+                },
+                term_span: span,
+                loop_depth: depth,
+            });
+            let mut make = |insts: Vec<Inst>, term: Terminator, depth: u32| {
+                let spans = vec![span; insts.len()];
+                function.blocks.push(Block {
+                    insts,
+                    spans,
+                    term,
+                    term_span: span,
+                    loop_depth: depth,
+                });
+            };
+            let get = |index: Operand| Inst::ListGet {
+                dst: row,
+                list,
+                index,
+                offset: 0,
+            };
+            make(
+                vec![
+                    get(Operand::Imm(0)),
+                    Inst::ListLen {
+                        dst,
+                        list: Operand::Reg(row),
+                    },
+                    Inst::Copy {
+                        dst: index,
+                        src: Operand::Imm(1),
+                    },
+                ],
+                Terminator::Jump(head),
+                depth,
+            );
+            make(
+                vec![],
+                Terminator::CmpBranch {
+                    cond: Cond::Lt,
+                    float: false,
+                    lhs: Operand::Reg(index),
+                    rhs: count,
+                    then: body,
+                    otherwise: rest,
+                },
+                depth + 1,
+            );
+            make(
+                vec![
+                    get(Operand::Reg(index)),
+                    Inst::ListLen {
+                        dst: length,
+                        list: Operand::Reg(row),
+                    },
+                    Inst::Binary {
+                        op: BinOp::Add,
+                        dst: index,
+                        lhs: Operand::Reg(index),
+                        rhs: Operand::Imm(1),
+                    },
+                ],
+                Terminator::CmpBranch {
+                    cond: Cond::Lt,
+                    float: false,
+                    lhs: Operand::Reg(length),
+                    rhs: Operand::Reg(dst),
+                    then: shorter,
+                    otherwise: head,
+                },
+                depth + 1,
+            );
+            make(
+                vec![Inst::Copy {
+                    dst,
+                    src: Operand::Reg(length),
+                }],
+                Terminator::Jump(head),
+                depth + 1,
+            );
+        }
+        function.blocks.push(Block {
+            insts,
+            spans,
+            term: retarget(&block.term, |BlockId(b)| BlockId(first[b]), |o| o),
+            term_span: block.term_span,
+            loop_depth: block.loop_depth,
+        });
     }
 }
 
@@ -816,6 +988,7 @@ fn is_removable(inst: &Inst) -> bool {
         | Inst::Compare { .. }
         | Inst::IntToFloat { .. }
         | Inst::ListLen { .. }
+        | Inst::MinRowLen { .. }
         | Inst::StrLen { .. }
         | Inst::StrByte { .. }
         | Inst::ListGet { .. }
@@ -1871,6 +2044,53 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    #[test]
+    fn a_nest_reading_rows_of_a_list_it_never_changes_runs_unchecked_behind_one_guard() {
+        let source = "fn f(a: list[list[int]], b: list[list[int]], n: int) -> list[int]:\n    \
+                      out = []\n    for i in range(n):\n        for j in range(n):\n            \
+                      t = 0\n            for k in range(n):\n                \
+                      t += a[i][k] * b[k][j]\n            out.append(t)\n    ret out\n";
+        let f = optimized(source, "f");
+        // the guard measured the rows, and nothing is left for the backends to expand
+        assert_eq!(
+            count(&f, |inst| matches!(inst, Inst::MinRowLen { .. })),
+            (0, 0),
+            "{f}"
+        );
+        // the innermost loop of the copy reads both rows' elements unchecked, while the nest as
+        // it was, for rows the guard finds too short, still checks them
+        let innermost = |f: &Function, checked: bool| {
+            f.blocks
+                .iter()
+                .filter(|block| block.loop_depth == 3)
+                .any(|block| {
+                    let loads = block
+                        .insts
+                        .iter()
+                        .filter(|inst| matches!(inst, Inst::ListLoad { .. }))
+                        .count();
+                    let reads = block
+                        .insts
+                        .iter()
+                        .filter(|inst| matches!(inst, Inst::ListGet { .. } | Inst::DataGet { .. }))
+                        .count();
+                    if checked {
+                        loads > 0
+                    } else {
+                        loads == 0 && reads >= 3
+                    }
+                })
+        };
+        assert!(innermost(&f, false), "{f}");
+        assert!(innermost(&f, true), "{f}");
+        // verifying keeps every check the copy left out
+        let verified = optimized_with(source, "f", Options { verify: true });
+        assert!(
+            failures(&verified).contains(&"compiler bug: facts removed a check that fails".into()),
+            "{verified}"
+        );
     }
 
     #[test]

@@ -321,8 +321,9 @@ a small, decidable kind (bounds between ints and lengths, signs of floats) so bu
 A proof the compiler gets wrong would be unsafe, so a build with `STONE_VERIFY_FACTS` set keeps
 every check it removed, failing with `compiler bug` if one would fail, and the golden programs and
 the fuzzer run that way. `STONE_STATS` counts the checks, counting, and allocation a program still
-does, so each step shows what it removed. The next steps: one guard before a loop nest for the
-rows of a list of lists (`matmul`), keeping fields of a list element in registers across a loop
+does, so each step shows what it removed. A list the function never changes cannot change
+while it runs, rows included, so a loop nest over the rows of a list of lists (`matmul`) tests
+their lengths once before it and runs a copy with no checks. The next steps: keeping fields of a list element in registers across a loop
 that provably never touches it (`nbody`), reserving room for appends a loop's count bounds,
 allocating values that never escape a statement from a region freed at once (`binary_trees`),
 and choosing smaller layouts, such as bytes for a list that only holds 0 and 1, from what the

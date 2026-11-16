@@ -998,7 +998,10 @@ impl X64Generator {
 
     fn emit_inst(&mut self, frame: &Frame, inst: &Inst) -> Result<(), String> {
         match inst {
-            Inst::Trig { .. } | Inst::SinCos { .. } | Inst::Never { .. } => {
+            Inst::Trig { .. }
+            | Inst::SinCos { .. }
+            | Inst::Never { .. }
+            | Inst::MinRowLen { .. } => {
                 return Err(format!("'{inst}' should have been expanded"));
             }
             Inst::DataGet {

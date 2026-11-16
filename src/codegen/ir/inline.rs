@@ -357,6 +357,11 @@ pub(super) fn rename_inst(
             dst: reg(dst),
             list: o(list),
         },
+        Inst::MinRowLen { dst, list, count } => Inst::MinRowLen {
+            dst: reg(dst),
+            list: o(list),
+            count: o(count),
+        },
         Inst::StrLen { dst, text } => Inst::StrLen {
             dst: reg(dst),
             text: o(text),

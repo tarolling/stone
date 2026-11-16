@@ -596,6 +596,17 @@ pub enum Inst {
     /// too many, as the check before every call of a stone function does. It stands for a call
     /// the optimizer inlined, which calls nothing itself, so the limit stays the interpreter's.
     DepthCheck,
+    /// `dst` is the fewest slots any of the first `count` elements of `list` has, each element
+    /// being a list, or 0 when `count` is at most 0, as in `v5 = min_row_len v1, v2`. Only
+    /// `opt::rows` makes one, in the guard before a loop nest that reads rows of a list it never
+    /// changes, after checking that `count` is at most the list's length, and `opt::expand_rows`
+    /// turns it into a loop after optimizing. Until then, passes treat it as reading `list` and
+    /// `count` and failing never.
+    MinRowLen {
+        dst: VReg,
+        list: Operand,
+        count: Operand,
+    },
     /// Stops the program with `compiler bug: <what>` if `lhs` compares with `rhs` as `cond`
     /// (signed ints, or floats as [`Inst::Compare`] compares them when `float`), as in
     /// `never_lt v3, 0 "ranges"`. It stands for a check an optimizer pass proved never fails and
@@ -651,6 +662,7 @@ impl Inst {
             | Inst::StrAddr { dst, .. }
             | Inst::BytesAddr { dst, .. }
             | Inst::ListLen { dst, .. }
+            | Inst::MinRowLen { dst, .. }
             | Inst::StrLen { dst, .. }
             | Inst::StrByte { dst, .. }
             | Inst::ListLoad { dst, .. }
@@ -715,6 +727,7 @@ impl Inst {
             | Inst::Never { lhs, rhs, .. } => vec![*lhs, *rhs],
             Inst::LoadGlobal { .. } | Inst::StrAddr { .. } | Inst::BytesAddr { .. } => vec![],
             Inst::ListLen { list, .. } | Inst::ListData { list, .. } => vec![*list],
+            Inst::MinRowLen { list, count, .. } => vec![*list, *count],
             Inst::StrLen { text, .. } => vec![*text],
             Inst::StrByte { text, index, .. } => vec![*text, *index],
             Inst::Packed {
@@ -1131,6 +1144,9 @@ impl fmt::Display for Inst {
                 write!(f, "{dst} = {}", crate::stdlib::repr_bytes(bytes))
             }
             Inst::ListLen { dst, list } => write!(f, "{dst} = len {list}"),
+            Inst::MinRowLen { dst, list, count } => {
+                write!(f, "{dst} = min_row_len {list}, {count}")
+            }
             Inst::StrLen { dst, text } => write!(f, "{dst} = str_len {text}"),
             Inst::StrByte { dst, text, index } => write!(f, "{dst} = str_byte {text}, {index}"),
             Inst::ListLoad { dst, list, index } => {

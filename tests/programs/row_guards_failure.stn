@@ -1,0 +1,10 @@
+// a row too short for the nest makes the guard run the checked nest, which fails where it would
+fn total(rows: list[list[int]], n: int) -> int:
+    t = 0
+    for i in range(n):
+        for j in range(n):
+            t += rows[i][j]
+    ret t
+
+print(total([[1, 2], [3, 4]], 2))
+print(total([[1, 2], [3]], 2))

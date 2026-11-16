@@ -31,6 +31,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   long as its appends), a branch whose comparison the bounds decide, the
   check that `math.sqrt`'s argument is not negative when it is a sum of squares, and the check of
   a float division by a constant other than zero. `nbody`'s loops now make no index checks.
+- A loop nest that reads rows of a list of lists the function never changes, as
+  `a[i][k] * b[k][j]` in a matrix product, tests the list's length and its rows' lengths once
+  before the nest, and then runs a copy that checks no index, or the nest as it was when a row
+  is too short, so errors stay where they were. `matmul` and `matmul_float` run about a fifth
+  faster.
 
 ## [0.4.6] - 2026-11-13
 

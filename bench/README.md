@@ -56,33 +56,37 @@ To add a benchmark, write `name.stn`, `name.c`, `name.rs`, and `name.py` (and `n
 
 ## Baseline
 
-Median of 9 runs on 2026-11-01, on an Intel Core i7-10750H under WSL2, pinned to one core with `taskset -c 2`, with gcc 13.3 and Python 3.12 from the distribution, and numpy 2.5.4 in a virtualenv for `vector`. Absolute times on a machine like this can differ by 2x between sessions, and by a fifth between runs of the suite, as CPU boost and background load change, so compare the ratio columns, which come from the same session, rather than times from different sessions. For a single change, time the old and new stone binaries against each other with `--stone`, as the History notes do.
+Median of 9 runs on 2026-11-15, on an Intel Core i7-10750H under WSL2, pinned to one core with `taskset -c 2`, with gcc 13.3, rustc 1.99, and Python 3.12 from the distribution, and numpy 2.5.5 in a virtualenv for `vector`. Absolute times on a machine like this can differ by 2x between sessions, and by a fifth between runs of the suite, as CPU boost and background load change, so compare the ratio columns, which come from the same session, rather than times from different sessions. For a single change, time the old and new stone binaries against each other with `--stone`, as the History notes do.
 
-| program | C -O2 (ms) | C -O0 (ms) | stone (ms) | Python (ms) | numpy (ms) | stone / C -O2 | Python / stone | numpy / stone |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| binary_trees | 111.7 | 168.1 | 134.9 | 1020.1 | | 1.2x | 7.6x | |
-| collatz | 71.2 | 118.8 | 71.0 | 2544.1 | | 1.0x | 35.8x | |
-| fib | 19.6 | 64.7 | 52.6 | 1302.4 | | 2.7x | 24.8x | |
-| globals | 241.7 | 262.6 | 55.8 | 5069.4 | | 0.2x | 90.8x | |
-| lcg | 62.7 | 69.1 | 58.0 | 5141.8 | | 0.9x | 88.7x | |
-| matmul | 19.4 | 78.9 | 105.9 | 2418.7 | | 5.5x | 22.8x | |
-| matmul_float | 29.1 | 82.8 | 94.9 | 1695.7 | | 3.3x | 17.9x | |
-| nbody | 73.4 | 325.6 | 103.5 | 5276.6 | | 1.4x | 51.0x | |
-| sieve | 117.0 | 126.1 | 136.0 | 1015.4 | | 1.2x | 7.5x | |
-| sort | 547.2 | 854.6 | 135.2 | 4590.2 | | 0.2x | 33.9x | |
-| strings | 98.3 | 130.7 | 197.9 | 1328.2 | | 2.0x | 6.7x | |
-| trig | 172.6 | 236.9 | 149.7 | 1022.9 | | 0.9x | 6.8x | |
-| vector | 64.0 | 144.7 | 78.0 | 3123.7 | 295.7 | 1.2x | 40.0x | 3.8x |
-| wordcount | 204.1 | 343.7 | 175.0 | 1038.7 | | 0.9x | 5.9x | |
-| geometric mean | | | | | | 1.2x | 20.9x | 3.8x |
+| program | C -O2 (ms) | C -O0 (ms) | stone (ms) | Python (ms) | numpy (ms) | Rust (ms) | Rust fast (ms) | stone / C -O2 | stone / Rust | stone / best Rust | Python / stone | numpy / stone | checks in loops |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| binary_trees | 100.4 | 147.5 | 118.4 | 913.7 | | 132.4 | 31.2 | 1.2x | 0.9x | 3.8x | 7.7x | | 3 |
+| collatz | 55.3 | 104.6 | 66.4 | 2178.0 | | 29.9 | | 1.2x | 2.2x | 2.2x | 32.8x | | 1 |
+| fib | 17.8 | 57.9 | 42.1 | 1120.2 | | 21.4 | | 2.4x | 2.0x | 2.0x | 26.6x | | 0 |
+| globals | 211.4 | 223.5 | 48.5 | 4290.0 | | 12.5 | | 0.2x | 3.9x | 3.9x | 88.4x | | 0 |
+| json_records | 649.8 | 686.7 | 645.5 | 1234.9 | | 426.4 | | 1.0x | 1.5x | 1.5x | 1.9x | | 130 |
+| lcg | 44.6 | 58.2 | 53.5 | 4420.5 | | 12.3 | | 1.2x | 4.4x | 4.4x | 82.7x | | 0 |
+| matmul | 15.7 | 63.3 | 33.8 | 1939.2 | | 33.5 | 19.1 | 2.2x | 1.0x | 1.8x | 57.3x | | 9 |
+| matmul_float | 24.7 | 67.8 | 37.1 | 1266.6 | | 32.2 | 24.9 | 1.5x | 1.2x | 1.5x | 34.1x | | 9 |
+| nbody | 58.6 | 265.6 | 81.6 | 4436.1 | | 37.2 | | 1.4x | 2.2x | 2.2x | 54.4x | | 4 |
+| options | 44.2 | 88.1 | 65.1 | 1794.6 | | 50.0 | | 1.5x | 1.3x | 1.3x | 27.6x | | 3 |
+| sieve | 92.3 | 115.3 | 97.6 | 905.6 | | 91.5 | | 1.1x | 1.1x | 1.1x | 9.3x | | 2 |
+| sort | 473.9 | 726.5 | 112.5 | 3920.0 | | 121.0 | | 0.2x | 0.9x | 0.9x | 34.9x | | 4 |
+| strings | 90.7 | 112.3 | 167.4 | 1192.4 | | 143.3 | 51.4 | 1.8x | 1.2x | 3.3x | 7.1x | | 6 |
+| trig | 148.0 | 206.7 | 129.4 | 891.5 | | 160.9 | | 0.9x | 0.8x | 0.8x | 6.9x | | 54 |
+| vector | 56.8 | 112.1 | 53.3 | 2584.1 | 212.9 | 50.7 | | 0.9x | 1.1x | 1.1x | 48.5x | 4.0x | 0 |
+| wordcount | 185.9 | 192.2 | 150.2 | 848.4 | | 153.9 | 144.6 | 0.8x | 1.0x | 1.0x | 5.6x | | 3 |
+| geometric mean | | | | | | | | 1.0x | 1.4x | 1.8x | 20.8x | 4.0x | |
 
-Compiled stone is about 1.2x slower than `gcc -O2` and about 21x faster than CPython, as a geometric mean. It is faster than `gcc -O2` on `globals`, `sort`, `trig`, `wordcount`, and `lcg`, as fast on `collatz`, faster than `gcc -O0` on every benchmark but `fib`, `matmul`, `matmul_float`, and `strings`, and about 3.8x faster than numpy on `vector`. The Python ratio is low on `strings`, `wordcount`, and `trig` because they spend their time in work CPython does in C: splitting and joining strings, hashing in `dict`, and the `math` module's functions.
+Compiled stone is about as fast as `gcc -O2`, 1.4x slower than idiomatic Rust and 1.8x slower than the faster of the two Rust versions, and about 21x faster than CPython, as geometric means. It is faster than `gcc -O2` on `globals`, `sort`, `trig`, `wordcount`, and `vector`, as fast on `json_records`, faster than `gcc -O0` on every benchmark but `strings`, and about 4x faster than numpy on `vector`. The Python ratio is low on `json_records`, `wordcount`, `trig`, and `strings` because they spend their time in work CPython does in C: parsing and writing text, hashing in `dict`, the `math` module's functions, and splitting and joining strings.
+
+The tuned Rust versions show what is left: `binary_trees` keeps its nodes in one arena of indexes that every tree reuses, where stone allocates and frees each node, `strings` formats numbers into one buffer and takes words as slices of it instead of allocating a string for each, and `matmul` reads one flat array per matrix. Idiomatic Rust is slower than stone on `binary_trees`, `sort`, and `trig`, and about as fast on `matmul` and `wordcount`, but several times faster on `globals`, `lcg`, and `collatz`, which no change here has looked into yet.
 
 - `sort` beats C because C's version calls a comparison function through `qsort` for every comparison, while stone sorts ints and floats by radix, a pass per byte in which they differ.
 - `globals` beats C because its constants are globals that the program assigns one literal each, once, so stone reads them as literals and `% modulus` shifts like `% 2147483648`. C's globals could change, so gcc loads them and uses `idiv`. Assigning such a global anywhere else makes stone load it too.
 - `trig` beats C because stone expands each trigonometric function inline from the same code the interpreter runs, and computes a sine and a cosine of the same value with one argument reduction, where C calls glibc's `sin` and `cos` separately.
 - `wordcount` beats C because a key is hashed eight bytes at a time and the index keeps part of each key's hash, so a lookup compares almost only the key it is after, and `counts.get(word).unwrap_or(0)` makes no option, while C's hand-written table hashes a byte at a time.
-- `sieve` is close to C because allocating and touching 40 MB of memory dominates all three native versions.
+- `sieve` is close to C because allocating and touching 40 MB of memory dominates every native version.
 - `binary_trees` is close to C because both spend their time allocating and freeing nodes, and stone's allocator, which keeps a free list per block size, keeps up with glibc's `malloc` there. Every `Tree.Leaf` is one shared static value, so stone allocates exactly the nodes C does.
 
 ### History
@@ -97,6 +101,7 @@ Compiled stone is about 1.2x slower than `gcc -O2` and about 21x faster than CPy
 | constant globals, multiply-high division, check hoisting and reuse, inlining | 1.6x | 4.0x | 0.2x | 1.2x | 4.7x | 1.2x | 1.5x |
 | floats in vector registers, invariant reads and element addresses before loops, loops tested at the bottom | 1.6x | 3.9x | 0.2x | 1.0x | 4.2x | 1.1x | 1.4x |
 | early returns before the frame, unchecked `range` indexes, inline `append`, and faster strings and maps (0.3.6) | 1.0x | 2.7x | 0.2x | 0.9x | 5.5x | 1.2x | 1.2x |
+| checks removed by inferred facts, one guard before a loop nest over rows (0.4.7; the mean now covers 16 programs) | 1.2x | 2.4x | 0.2x | 1.2x | 2.2x | 1.1x | 1.0x |
 
 Each cell is stone's time over `gcc -O2`'s from the same session, and the geometric mean covers the six columns shown. Benchmarks a change does not touch still move by a few tenths between rows, which shows the noise. The row in which programs read their sizes from `.args` changed the C versions too, since gcc can no longer specialize on a constant size. In the last row, `matmul`'s ratio rose because `gcc -O2` ran faster in that session, while stone's time stayed about the same. For a single change, timing the old and new stone binaries against each other in one session is more reliable: inlining index checks made `matmul` 1.25x faster that way, and left `sieve` unchanged, since memory traffic dominates it. Register allocation, timed the same way with `--stone`, made `collatz` 2.6x faster, `matmul` and `matmul_float` 2.5x, `lcg` 2.3x, `fib` 1.6x, `globals` 1.35x, and `sieve` 1.17x.
 

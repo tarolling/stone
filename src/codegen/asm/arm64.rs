@@ -1266,6 +1266,13 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
             count(0)?;
             Ok((0xd503201f, None))
         }
+        "dsb" => {
+            count(1)?;
+            if operands[0] != "sy" {
+                return Err(format!("only dsb sy is supported, not '{}'", operands[0]));
+            }
+            Ok((0xd5033f9f, None))
+        }
         "svc" => {
             count(1)?;
             let value = imm(operands[0])?;
@@ -1689,6 +1696,7 @@ mod tests {
             ("blr x17", "d63f0220"),
             ("blr x3", "d63f0060"),
             ("svc #0", "d4000001"),
+            ("dsb sy", "d5033f9f"),
         ]);
     }
 

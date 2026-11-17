@@ -1,6 +1,7 @@
 //! The builtin functions shared by the interpreter and the compiler, and the limits both enforce.
 
 pub mod fs;
+pub mod gpu;
 pub mod gui;
 pub mod json;
 pub mod math;
@@ -56,7 +57,7 @@ pub static MODULES: [BuiltinModule; 5] = [
 
 /// The builtin modules that only stone's own modules written in stone, such as `net`, may use,
 /// which editors and the reference do not list.
-pub static INTERNAL_MODULES: [BuiltinModule; 2] = [
+pub static INTERNAL_MODULES: [BuiltinModule; 3] = [
     BuiltinModule {
         name: net::SYS_MODULE,
         doc: net::SYS_MODULE_DOC,
@@ -66,6 +67,11 @@ pub static INTERNAL_MODULES: [BuiltinModule; 2] = [
         name: gui::SYS_MODULE,
         doc: gui::SYS_MODULE_DOC,
         functions: &gui::SYS_DOCS,
+    },
+    BuiltinModule {
+        name: gpu::SYS_MODULE,
+        doc: gpu::SYS_MODULE_DOC,
+        functions: &gpu::SYS_DOCS,
     },
 ];
 
@@ -79,7 +85,15 @@ pub static SOURCE_MODULES: [(&str, &str); 3] = [
 
 /// The modules written in stone that only stone's own modules may use, as they may use
 /// [`INTERNAL_MODULES`], by name with their source.
-pub static INTERNAL_SOURCE_MODULES: [(&str, &str); 6] = gui::INTERNAL_SOURCES;
+pub static INTERNAL_SOURCE_MODULES: [(&str, &str); 7] = [
+    gui::INTERNAL_SOURCES[0],
+    gui::INTERNAL_SOURCES[1],
+    gui::INTERNAL_SOURCES[2],
+    gui::INTERNAL_SOURCES[3],
+    gui::INTERNAL_SOURCES[4],
+    gui::INTERNAL_SOURCES[5],
+    (gpu::NV_MODULE, gpu::NV_SOURCE),
+];
 
 /// Returns the builtin module named `name`, internal ones included.
 ///

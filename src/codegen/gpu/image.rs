@@ -13,9 +13,11 @@
 //! shapes   (16 each)   per kernel: params u32, flags u32, lists u64
 //! devices  (48 each)   sm u32, specific u32, offset of the device's kernels u64 (0 for none),
 //!                      cubin offset u64, cubin size u64, PTX offset u64, PTX size u64
-//! kernels  (32 each)   per device, in kernel order: code offset u64, code size u64, registers,
-//!                      param_offset, param_size, shared (all u32)
-//! code                 the machine code of each kernel, each cubin, and each PTX text
+//! kernels  (48 each)   per device, in kernel order: code offset u64, code size u64, registers,
+//!                      param_offset, param_size, shared (all u32), then the offset and size
+//!                      of the kernel's constant bank 2 (u64 each, a size of 0 for none)
+//! code                 the machine code and constant bank 2 of each kernel, each cubin, and
+//!                      each PTX text
 //! ```
 //!
 //! A record is a piece of arithmetic on lists, as `Program::device_kernels` numbers them, which
@@ -37,7 +39,7 @@ use crate::codegen::device::Device;
 /// The first bytes of an image.
 pub const MAGIC: &[u8; 8] = b"STONEGPU";
 /// The version of the layout above.
-pub const VERSION: u32 = 2;
+pub const VERSION: u32 = 3;
 /// The label of the image in the executable.
 pub const LABEL: &str = "stone.gpu_image";
 
@@ -48,7 +50,7 @@ pub const SHAPE_SIZE: usize = 16;
 /// The size of a device entry.
 pub const DEVICE_SIZE: usize = 48;
 /// The size of a kernel entry.
-pub const KERNEL_SIZE: usize = 32;
+pub const KERNEL_SIZE: usize = 48;
 const CODE_ALIGNMENT: usize = 128;
 
 /// The flag of a shape whose kernel takes a fail flag last.
@@ -88,6 +90,8 @@ pub struct KernelImage {
     pub param_offset: u32,
     pub param_size: u32,
     pub shared: u32,
+    /// The kernel's constant bank 2, or nothing.
+    pub literals: Vec<u8>,
 }
 
 /// The code of an image that is built for one GPU.
@@ -231,6 +235,12 @@ pub fn build(
                 put_u32(&mut bytes, at + 28, kernel.shared);
                 code.extend_from_slice(&kernel.sass);
                 code.resize(align(code.len(), CODE_ALIGNMENT), 0);
+                if !kernel.literals.is_empty() {
+                    put_u64(&mut bytes, at + 32, (code_start + code.len()) as u64);
+                    put_u64(&mut bytes, at + 40, kernel.literals.len() as u64);
+                    code.extend_from_slice(&kernel.literals);
+                    code.resize(align(code.len(), CODE_ALIGNMENT), 0);
+                }
             }
             table_at += table_size;
         }
@@ -342,6 +352,7 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
                     param_offset: word(at + 20)?,
                     param_size: word(at + 24)?,
                     shared: word(at + 28)?,
+                    literals: range(at + 32)?.to_vec(),
                 });
             }
         }
@@ -508,6 +519,18 @@ mod tests {
         assert_eq!(device.kernels[1].param_size, 40);
         // a program that places machine code itself carries no module
         assert!(device.cubin.is_empty() && device.ptx.is_empty());
+    }
+
+    #[test]
+    fn an_image_gives_back_each_kernels_literal_pool() {
+        let mut with_literals = code("sm_75");
+        let kernels = &mut with_literals.cubin.as_mut().unwrap().kernels;
+        let k1 = kernels.iter_mut().find(|k| k.name == "stone_k1").unwrap();
+        k1.literals = vec![1, 0, 0, 0, 0, 0, 0, 0];
+        let bytes = build(&[0, 1], &shapes(), &[with_literals], Carry::Sass).unwrap();
+        let device = &parse(&bytes).unwrap().devices[0];
+        assert!(device.kernels[0].literals.is_empty());
+        assert_eq!(device.kernels[1].literals, [1, 0, 0, 0, 0, 0, 0, 0]);
     }
 
     #[test]

@@ -696,6 +696,10 @@ impl Arm64Generator {
         if self.ctx.uses(&["stone.gpu_launch"]) {
             gpu::gpu_runtime(self);
         }
+        let gpu = self.ctx.module_routines("stone.gpu_");
+        if !gpu.is_empty() {
+            gpu::gpu_sys_runtime(self, &gpu);
+        }
         let random: Vec<&str> = [
             "stone.random_seed",
             "stone.random_float",

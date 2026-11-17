@@ -10216,6 +10216,31 @@ impl Inference {
                 }
                 ret
             }
+            "gpu_sys.open" | "gpu_sys.close" | "gpu_sys.ioctl" | "gpu_sys.mmap"
+            | "gpu_sys.munmap" | "gpu_sys.peek32" | "gpu_sys.peek64" | "gpu_sys.poke32"
+            | "gpu_sys.poke64" | "gpu_sys.copy" | "gpu_sys.fence" | "gpu_sys.state"
+            | "gpu_sys.set_state" | "gpu_sys.image" => {
+                let ints = |n: usize| vec![Ty::Int; n];
+                let (params, ret) = match name {
+                    "gpu_sys.open" => (vec![Ty::Str], Ty::Int),
+                    "gpu_sys.close" | "gpu_sys.set_state" => (ints(1), Ty::Unit),
+                    "gpu_sys.ioctl" => (ints(3), Ty::Int),
+                    "gpu_sys.mmap" => (ints(6), Ty::Int),
+                    "gpu_sys.munmap" | "gpu_sys.poke32" | "gpu_sys.poke64" => (ints(2), Ty::Unit),
+                    "gpu_sys.peek32" | "gpu_sys.peek64" => (ints(1), Ty::Int),
+                    "gpu_sys.copy" => (ints(3), Ty::Unit),
+                    "gpu_sys.fence" => (vec![], Ty::Unit),
+                    _ => (vec![], Ty::Int),
+                };
+                if args.len() == params.len() {
+                    for ((arg, ty), param) in args.iter().zip(arg_types).zip(&params) {
+                        self.expect(param, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, &params.len().to_string(), args.len());
+                }
+                ret
+            }
             "net_sys.connect_unix" | "net_sys.ready" | "net_sys.lookup" => {
                 let params = match name {
                     "net_sys.ready" => vec![Ty::Handle(Handle::Socket), Ty::Int],

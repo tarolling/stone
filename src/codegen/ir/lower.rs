@@ -5532,15 +5532,38 @@ impl<'a> Lowerer<'a> {
             });
         }
         let ran = self.fresh();
+        let linux = self.context.os == Os::Linux;
+        let callee = match linux {
+            // the driver is stone code, `gpu_nv`, linked into every build with GPUs
+            true => Callee::Helper(function_label(&format!(
+                "{}.launch",
+                crate::stdlib::gpu::NV_MODULE
+            ))),
+            false => Callee::Runtime("stone.gpu_launch"),
+        };
         self.push(Inst::Call {
             dsts: vec![ran],
-            callee: Callee::Runtime("stone.gpu_launch"),
+            callee,
             args: vec![Operand::Imm(record as i64), Operand::Reg(list)],
         });
         self.push(Inst::Release {
             src: Operand::Reg(list),
             kind: RcKind::List,
         });
+        if linux {
+            let (refused, answered) = (self.new_block(), self.new_block());
+            self.terminate(Terminator::CmpBranch {
+                cond: Cond::Lt,
+                float: false,
+                lhs: Operand::Reg(ran),
+                rhs: Operand::Imm(0),
+                then: refused,
+                otherwise: answered,
+            });
+            self.start(refused);
+            self.refuse(ran);
+            self.start(answered);
+        }
         let (processor, done) = (self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Ne,
@@ -5552,6 +5575,77 @@ impl<'a> Lowerer<'a> {
         });
         self.start(processor);
         done
+    }
+
+    /// Stops the program with the error of a launch that `gpu_nv.launch` refused under
+    /// `STONE_GPU=require`, which it gives in `ran` as minus its kind plus 16 times its detail.
+    ///
+    /// For example, -36 979 is kind 3 with detail 2 313, which is `8 * 256 + 9`: no code for
+    /// compute capability 8.9.
+    fn refuse(&mut self, ran: VReg) {
+        let code = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Sub,
+            dst: code,
+            lhs: Operand::Imm(0),
+            rhs: Operand::Reg(ran),
+        });
+        let (kind, detail) = (self.fresh(), self.fresh());
+        self.push(Inst::Binary {
+            op: BinOp::And,
+            dst: kind,
+            lhs: Operand::Reg(code),
+            rhs: Operand::Imm(15),
+        });
+        self.push(Inst::Binary {
+            op: BinOp::Shr,
+            dst: detail,
+            lhs: Operand::Reg(code),
+            rhs: Operand::Imm(4),
+        });
+        use crate::codegen::gpu;
+        let kinds = [
+            (1, gpu::NO_LINUX_DRIVER),
+            (2, gpu::NO_DEVICE),
+            (3, gpu::NO_CODE),
+            (4, gpu::DRIVER_ERROR),
+            (5, gpu::TOO_MANY_VALUES),
+        ];
+        for (number, message) in kinds {
+            let (fail, next) = (self.new_block(), self.new_block());
+            self.terminate(Terminator::CmpBranch {
+                cond: Cond::Eq,
+                float: false,
+                lhs: Operand::Reg(kind),
+                rhs: Operand::Imm(number),
+                then: fail,
+                otherwise: next,
+            });
+            self.start(fail);
+            let values = match number {
+                3 => {
+                    let (major, minor) = (self.fresh(), self.fresh());
+                    self.push(Inst::Binary {
+                        op: BinOp::Shr,
+                        dst: major,
+                        lhs: Operand::Reg(detail),
+                        rhs: Operand::Imm(8),
+                    });
+                    self.push(Inst::Binary {
+                        op: BinOp::And,
+                        dst: minor,
+                        lhs: Operand::Reg(detail),
+                        rhs: Operand::Imm(255),
+                    });
+                    vec![Operand::Reg(major), Operand::Reg(minor)]
+                }
+                4 => vec![Operand::Reg(detail)],
+                _ => vec![],
+            };
+            self.terminate(Terminator::Fail(message.to_string(), values));
+            self.start(next);
+        }
+        self.terminate(Terminator::Fail(gpu::TIMED_OUT.to_string(), vec![]));
     }
 
     /// Computes `lhs op rhs` on two numbers or, for `+`, two strings, both of type `ty`, into

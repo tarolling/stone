@@ -93,6 +93,10 @@ enum Backend {
     /// `stone build --gpu sm_75` for the host, whose arithmetic on lists first tries to launch a
     /// kernel and, finding no GPU to launch it on, computes on the processor.
     Gpu,
+    /// `stone build --gpu sm_<N>` for the host's own NVIDIA GPU, of compute capability `N` (89
+    /// for 8.9), run with `STONE_GPU=require`, so every kernel the GPU can run must run there
+    /// and print what the processor does.
+    GpuDevice(u32),
     /// `stone build` for the host with `STONE_VERIFY_FACTS` set, so every check an optimizer
     /// pass removed on a proof is still made, and fails with `compiler bug` if the proof was
     /// wrong.
@@ -135,6 +139,7 @@ impl Backend {
             }) => "build-x86_64v4",
             Backend::Level(_) => "build-aarch64v9",
             Backend::Gpu => "build-gpu",
+            Backend::GpuDevice(_) => "build-gpu-device",
             Backend::Verify => "build-verify",
         }
     }
@@ -399,12 +404,15 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
         | Backend::Windows(_)
         | Backend::Level(_)
         | Backend::Gpu
+        | Backend::GpuDevice(_)
         | Backend::Verify => {
             let suffix = match backend {
                 Backend::Windows(_) => ".exe",
-                Backend::Build | Backend::Level(_) | Backend::Gpu | Backend::Verify => {
-                    std::env::consts::EXE_SUFFIX
-                }
+                Backend::Build
+                | Backend::Level(_)
+                | Backend::Gpu
+                | Backend::GpuDevice(_)
+                | Backend::Verify => std::env::consts::EXE_SUFFIX,
                 _ => "",
             };
             let exe = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -421,6 +429,9 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 }
                 Backend::Gpu => {
                     build.args(["--gpu", "sm_75"]);
+                }
+                Backend::GpuDevice(capability) => {
+                    build.arg("--gpu").arg(format!("sm_{capability}"));
                 }
                 Backend::Verify => {
                     build.env("STONE_VERIFY_FACTS", "1");
@@ -477,6 +488,11 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                     }
                     let mut command = Command::new(&exe);
                     command.env("WSLENV", shared);
+                    command
+                }
+                Backend::GpuDevice(_) => {
+                    let mut command = Command::new(&exe);
+                    command.env("STONE_GPU", "require");
                     command
                 }
                 _ => Command::new(&exe),
@@ -648,6 +664,43 @@ fn gpu_compiler_matches_expected() {
         return;
     }
     check_all(Backend::Gpu);
+}
+
+/// Builds every program for the host's NVIDIA GPU and runs it with `STONE_GPU=require`, so each
+/// kernel runs on the GPU and must print what the processor's loop does. Skips without a driver,
+/// a GPU `nvidia-smi` reports, or `ptxas` (`STONE_PTXAS`, else on `PATH`).
+#[test]
+fn gpu_device_compiler_matches_expected() {
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+        return;
+    }
+    if !Path::new("/dev/nvidiactl").exists() {
+        eprintln!("skipped running kernels on a GPU: /dev/nvidiactl was not found");
+        return;
+    }
+    let Some(capability) = gpu_capability() else {
+        eprintln!("skipped running kernels on a GPU: nvidia-smi reported no GPU");
+        return;
+    };
+    let ptxas = std::env::var("STONE_PTXAS").unwrap_or_else(|_| "ptxas".to_string());
+    if !runs(&ptxas) {
+        eprintln!("skipped running kernels on a GPU: {ptxas} was not found");
+        return;
+    }
+    check_all(Backend::GpuDevice(capability));
+}
+
+/// Returns the compute capability of the first GPU `nvidia-smi` lists, as one number.
+///
+/// For example, an RTX 4000 Ada reports `8.9`, which gives `89`.
+fn gpu_capability() -> Option<u32> {
+    let output = Command::new("nvidia-smi")
+        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let (major, minor) = text.lines().next()?.trim().split_once('.')?;
+    Some(major.parse::<u32>().ok()? * 10 + minor.parse::<u32>().ok()?)
 }
 
 /// Builds every program for x86-64 `v3` and runs it, on an x86-64 machine that reaches that level,

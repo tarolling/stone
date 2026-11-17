@@ -123,7 +123,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 44] = [
+pub const MODULE_ROUTINES: [(&str, &str); 58] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -172,6 +172,21 @@ pub const MODULE_ROUTINES: [(&str, &str); 44] = [
     ("gui_sys.window_show", "stone.win_show"),
     ("gui_sys.window_set_title", "stone.win_set_title"),
     ("gui_sys.window_close", "stone.win_close"),
+    // the system calls and raw memory behind GPU kernels, which only Linux builds use
+    ("gpu_sys.open", "stone.gpu_open"),
+    ("gpu_sys.close", "stone.gpu_close"),
+    ("gpu_sys.ioctl", "stone.gpu_ioctl"),
+    ("gpu_sys.mmap", "stone.gpu_mmap"),
+    ("gpu_sys.munmap", "stone.gpu_munmap"),
+    ("gpu_sys.peek32", "stone.gpu_peek32"),
+    ("gpu_sys.peek64", "stone.gpu_peek64"),
+    ("gpu_sys.poke32", "stone.gpu_poke32"),
+    ("gpu_sys.poke64", "stone.gpu_poke64"),
+    ("gpu_sys.copy", "stone.gpu_copy"),
+    ("gpu_sys.fence", "stone.gpu_fence"),
+    ("gpu_sys.state", "stone.gpu_get_slot"),
+    ("gpu_sys.set_state", "stone.gpu_set_slot"),
+    ("gpu_sys.image", "stone.gpu_image_address"),
 ];
 
 /// The routines of the `fs` module that can return an error, which needs the routines that

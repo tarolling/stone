@@ -124,8 +124,16 @@ The `STONE_GPU` environment variable changes this when the program runs: `off` c
 everything on the processor, and `require` makes a program that cannot use the GPU stop with
 an error at the arithmetic instead, such as `no GPU ran this program's kernels: nvcuda.dll is
 missing or too old`, `there is no CUDA device`, `it has no code for compute capability 8.6`,
-or `CUDA error 2`. Linux executables carry the machine code too, but they do not run it yet,
-and macOS executables carry no GPU code, so both compute everything on the processor.
+or `CUDA error 2`.
+
+A Linux executable built with `--gpu` runs the machine code `ptxas` made on an NVIDIA GPU too,
+on x86-64 and arm64, without libcuda or any other library: it speaks to NVIDIA's kernel driver
+through `/dev/nvidiactl` and `/dev/nvidia0` itself. So far it knows the interface of driver
+version 595 and the GPUs of the Ampere (`sm_86`) and Ada (`sm_89`) generations; on any
+other driver or GPU, or without machine code for the GPU, it computes on the processor, and
+under `STONE_GPU=require` stops with an error such as `NVIDIA's driver is missing or
+unsupported`. macOS executables carry no GPU code, so they compute everything on the processor.
+See [Running code on the GPU](../guides/gpu.md) to set this up.
 
 `--windows-gui` builds Windows executables as programs with windows rather than console
 programs, so opening one from Explorer opens no console beside its window. Such a program has

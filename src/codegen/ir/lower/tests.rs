@@ -1955,12 +1955,14 @@ fn dump_launching(source: &str, gpu_launch: bool) -> String {
 fn a_program_for_a_gpu_tries_each_kernel_before_the_loop() {
     let source = "a = [1.0, 2.0]\nb = [3.0, 4.0]\nprint(a * 2.0 + b)\nprint([1, 2] * 3)\n";
     let without = dump_launching(source, false);
-    assert!(!without.contains("gpu_launch"), "{without}");
+    assert!(!without.contains("gpu_nv.launch"), "{without}");
     let with = dump_launching(source, true);
-    // one launch per recorded kernel, by its number, each given the result, length, and
-    // arguments in the order the kernel takes them
-    assert_eq!(with.matches("stone.gpu_launch(0, ").count(), 1, "{with}");
-    assert_eq!(with.matches("stone.gpu_launch(1, ").count(), 1, "{with}");
+    // one launch per recorded kernel through the stone driver, by its number, each given the
+    // result, length, and arguments in the order the kernel takes them
+    assert_eq!(with.matches("fn.gpu_nv.launch(0, ").count(), 1, "{with}");
+    assert_eq!(with.matches("fn.gpu_nv.launch(1, ").count(), 1, "{with}");
+    // a refusal under `STONE_GPU=require` fails at the arithmetic
+    assert_eq!(with.matches("the GPU did not finish in time").count(), 2);
     // the loop that computes the same on the processor is still there for a launch that fails
     assert_eq!(
         with.matches("list_set").count(),
@@ -1971,7 +1973,7 @@ fn a_program_for_a_gpu_tries_each_kernel_before_the_loop() {
 #[test]
 fn arithmetic_a_gpu_cannot_compute_is_never_launched() {
     let with = dump_launching("a = [7, 8]\nb = [2, 3]\nprint(a % b)\n", true);
-    assert!(!with.contains("gpu_launch"), "{with}");
+    assert!(!with.contains("gpu_nv.launch"), "{with}");
 }
 
 #[test]

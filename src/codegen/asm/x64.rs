@@ -1188,6 +1188,7 @@ fn encode(
         ("leave", []) => fixed(&[0xc9]),
         ("nop", []) => fixed(&[0x90]),
         ("syscall", []) => fixed(&[0x0f, 0x05]),
+        ("mfence", []) => fixed(&[0x0f, 0xae, 0xf0]),
         ("cpuid", []) => fixed(&[0x0f, 0xa2]),
         ("xgetbv", []) => fixed(&[0x0f, 0x01, 0xd0]),
         ("movsb", []) => fixed(&[0xa4]),
@@ -1606,6 +1607,7 @@ fn is_known(mnemonic: &str) -> bool {
         "leave",
         "nop",
         "syscall",
+        "mfence",
         "cpuid",
         "xgetbv",
         "movsb",
@@ -2195,6 +2197,7 @@ mod tests {
             ("rep stosb", "f3 aa"),
             ("movsb", "a4"),
             ("syscall", "0f 05"),
+            ("mfence", "0f ae f0"),
             ("leave", "c9"),
         ]);
     }

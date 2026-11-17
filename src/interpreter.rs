@@ -3613,6 +3613,10 @@ impl<'out> Interpreter<'out> {
                 time::sleep(*seconds)?;
                 return Ok(Value::Unit);
             }
+            // only compiled code runs kernels, so only a build links the driver that calls these
+            (name, _) if name.starts_with("gpu_sys.") => {
+                return Err(format!("'{name}' runs only in a compiled program").into());
+            }
             _ => {}
         }
 

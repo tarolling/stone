@@ -12,6 +12,13 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Linux executables built with `--gpu` run their arithmetic on lists on an NVIDIA GPU, on
+  x86-64 and arm64, speaking to NVIDIA's kernel driver through `/dev/nvidia*` themselves with no
+  libcuda. They need the machine code `ptxas` makes, and so far know driver version 595 and
+  Ampere (`sm_86`) and Ada (`sm_89`) GPUs, computing on the processor anywhere else;
+  `STONE_GPU=off` and `STONE_GPU=require` work as on Windows. See the new guide, "Running code
+  on the GPU".
+
 - `STONE_VERIFY_FACTS=1 stone build` keeps every check an optimization proved never fails and
   removed, as a check that stops the program with `compiler bug: <pass> removed a check that
   fails` if the proof was wrong, so a mistaken proof shows up rather than reading outside a list.

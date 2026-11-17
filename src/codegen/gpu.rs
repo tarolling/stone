@@ -45,3 +45,16 @@ pub const CUDA_ERROR: &str = "no GPU ran this program's kernels: CUDA error {}";
 /// than a launch passes.
 pub const TOO_MANY_VALUES: &str =
     "no GPU ran this program's kernels: a kernel takes more than 64 values";
+
+/// The error of a Linux program run with `STONE_GPU=require` on a machine without NVIDIA's
+/// kernel driver, or with a version of it stone does not speak.
+pub const NO_LINUX_DRIVER: &str =
+    "no GPU ran this program's kernels: NVIDIA's driver is missing or unsupported";
+
+/// The error of a Linux program run with `STONE_GPU=require` whose GPU's driver refused a
+/// request, with the driver's status or the system's error number in the hole.
+pub const DRIVER_ERROR: &str = "no GPU ran this program's kernels: the driver failed (status {})";
+
+/// The error of a Linux program run with `STONE_GPU=require` whose GPU did not finish a kernel
+/// in time.
+pub const TIMED_OUT: &str = "no GPU ran this program's kernels: the GPU did not finish in time";

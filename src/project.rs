@@ -447,6 +447,26 @@ pub fn link(entry: &Path, source: &str, sources: &dyn Sources) -> Linked {
 /// For example, with `p` as the root, the entry file `p/geometry/shapes.stn` can use
 /// `geometry.vec`, and is itself the module `geometry.shapes`.
 pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -> Linked {
+    link_requiring(root, entry, source, sources, &[])
+}
+
+/// Links like [`link`], loading the modules written in stone named in `required` as well, used
+/// or not, as a build for a GPU loads the driver its kernels need.
+///
+/// For example, `link_with(entry, "print(1)", sources, &["gpu_nv"])` links `gpu_nv` with a
+/// program that never names it.
+pub fn link_with(entry: &Path, source: &str, sources: &dyn Sources, required: &[&str]) -> Linked {
+    let root = entry.parent().unwrap_or(Path::new(""));
+    link_requiring(root, entry, source, sources, required)
+}
+
+fn link_requiring(
+    root: &Path,
+    entry: &Path,
+    source: &str,
+    sources: &dyn Sources,
+    required: &[&str],
+) -> Linked {
     let relative = entry.strip_prefix(root).unwrap_or(entry).with_extension("");
     let entry_names = relative
         .components()
@@ -483,6 +503,9 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
     };
     loader.add(entry.to_path_buf(), String::new(), source.to_string(), 0);
     loader.load_packages();
+    for name in required {
+        loader.module(0, &[name.to_string()], true);
+    }
 
     // each file's uses can add files, which are resolved in turn
     let mut next = 0;

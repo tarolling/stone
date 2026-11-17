@@ -21,6 +21,12 @@ pub struct CubinKernel {
     pub param_size: u32,
     /// The bytes of static shared memory a block needs.
     pub shared: u32,
+    /// The bytes of stack each thread needs in local memory, 0 unless the kernel spills
+    /// registers or indexes an array at run time.
+    pub stack: u32,
+    /// The kernel's literal pool, constant bank 2, which `ptxas` fills with constants too wide
+    /// for an instruction, such as a 64-bit 1; empty when the kernel needs none.
+    pub literals: Vec<u8>,
 }
 
 /// Returns the kernels of `cubin`, in the order of its symbol table.
@@ -32,8 +38,9 @@ pub fn parse(cubin: &[u8]) -> Result<Vec<CubinKernel>, String> {
     let symbols = file
         .section_named(".symtab")
         .ok_or_else(|| not_a_cubin("no symbol table"))?;
+    let stacks = file.stacks()?;
     let mut kernels = Vec::new();
-    for entry in symbols.data.as_chunks::<SYMBOL_SIZE>().0 {
+    for (index, entry) in symbols.data.as_chunks::<SYMBOL_SIZE>().0.iter().enumerate() {
         let name_offset = u32_at(entry, 0).ok_or_else(|| not_a_cubin("short symbol"))?;
         let is_function = entry[4] & 0xf == STT_FUNC;
         let is_global = entry[4] >> 4 == STB_GLOBAL;
@@ -48,6 +55,9 @@ pub fn parse(cubin: &[u8]) -> Result<Vec<CubinKernel>, String> {
         let shared = file
             .section_named(&format!(".nv.shared.{name}"))
             .map_or(0, |section| section.size);
+        let literals = file
+            .section_named(&format!(".nv.constant2.{name}"))
+            .map_or_else(Vec::new, |section| section.data.to_vec());
         kernels.push(CubinKernel {
             name,
             sass: text.data.to_vec(),
@@ -56,17 +66,24 @@ pub fn parse(cubin: &[u8]) -> Result<Vec<CubinKernel>, String> {
             param_offset,
             param_size,
             shared: shared as u32,
+            stack: stacks
+                .iter()
+                .filter(|&&(symbol, _)| symbol as usize == index)
+                .map(|&(_, size)| size)
+                .max()
+                .unwrap_or(0),
+            literals,
         });
     }
     Ok(kernels)
 }
 
 /// Returns the names of the sections of `cubin` that a program loading its kernels itself would
-/// have to place in memory or patch, which stone cannot do: constant banks other than bank 0,
-/// global and local memory, and relocations of code.
+/// have to place in memory or patch, which stone cannot do: constant banks other than bank 0 and
+/// a kernel's own bank 2, global and local memory, and relocations of code.
 ///
-/// For example, a cubin of kernels that use only registers, their parameters, and global memory
-/// through pointers gives no names, and one with a literal pool in `.nv.constant2.stone_k0` gives
+/// For example, a cubin of kernels that use only registers, their parameters, literals, and
+/// global memory through pointers gives no names, and one with a shared `.nv.constant3` gives
 /// that name.
 pub fn unplaceable_sections(cubin: &[u8]) -> Result<Vec<String>, String> {
     let file = Elf::new(cubin)?;
@@ -79,10 +96,11 @@ pub fn unplaceable_sections(cubin: &[u8]) -> Result<Vec<String>, String> {
 }
 
 /// Returns whether a section called `name` holds data or relocations that a loader must place.
+/// A kernel's own literal pool, `.nv.constant2.<kernel>`, is placed with its kernel.
 fn is_unplaceable(name: &str) -> bool {
     let constant_bank = name
         .strip_prefix(".nv.constant")
-        .is_some_and(|rest| !rest.starts_with('0'));
+        .is_some_and(|rest| !rest.starts_with('0') && !rest.starts_with("2."));
     constant_bank
         || name.starts_with(".nv.global")
         || name.starts_with(".nv.local")
@@ -102,6 +120,10 @@ const FORMAT_BLOCK: u8 = 4;
 const ATTR_PARAM_CBANK: u8 = 0x0a;
 /// The record that gives the bytes of a kernel's parameters.
 const ATTR_PARAM_SIZE: u8 = 0x19;
+/// The records of the global `.nv.info` that give a kernel's stack frame and the least stack it
+/// needs, each the kernel's symbol index and then the bytes.
+const ATTR_FRAME_SIZE: u8 = 0x11;
+const ATTR_MIN_STACK_SIZE: u8 = 0x12;
 
 fn not_a_cubin(reason: &str) -> String {
     format!("not a cubin: {reason}")
@@ -205,22 +227,13 @@ impl<'a> Elf<'a> {
             .section_named(&format!(".nv.info.{name}"))
             .ok_or_else(|| not_a_cubin(&format!("no launch information for '{name}'")))?;
         let (mut offset, mut size) = (None, None);
-        let mut at = 0;
-        while at + 4 <= info.data.len() {
-            let (format, attribute) = (info.data[at], info.data[at + 1]);
-            let value = u16_at(info.data, at + 2).unwrap_or(0) as usize;
-            at += 4;
-            if format == FORMAT_BLOCK {
-                let record = info
-                    .data
-                    .get(at..at + value)
-                    .ok_or_else(|| not_a_cubin("truncated launch information"))?;
-                if attribute == ATTR_PARAM_CBANK {
-                    offset = u16_at(record, 4).map(u32::from);
+        for record in records(info.data)? {
+            match record {
+                Record::Block(ATTR_PARAM_CBANK, block) => {
+                    offset = u16_at(block, 4).map(u32::from);
                 }
-                at += value;
-            } else if attribute == ATTR_PARAM_SIZE {
-                size = Some(value as u32);
+                Record::Value(ATTR_PARAM_SIZE, value) => size = Some(u32::from(value)),
+                _ => {}
             }
         }
         match (offset, size) {
@@ -228,6 +241,57 @@ impl<'a> Elf<'a> {
             _ => Err(not_a_cubin(&format!("no parameters recorded for '{name}'"))),
         }
     }
+
+    /// Returns the stack sizes the global `.nv.info` section records, as pairs of a kernel's
+    /// symbol index and bytes; a cubin without the section records none.
+    fn stacks(&self) -> Result<Vec<(u32, u32)>, String> {
+        let Some(info) = self.section_named(".nv.info") else {
+            return Ok(Vec::new());
+        };
+        let mut stacks = Vec::new();
+        for record in records(info.data)? {
+            if let Record::Block(ATTR_FRAME_SIZE | ATTR_MIN_STACK_SIZE, block) = record {
+                let short = || not_a_cubin("truncated stack size");
+                stacks.push((
+                    u32_at(block, 0).ok_or_else(short)?,
+                    u32_at(block, 4).ok_or_else(short)?,
+                ));
+            }
+        }
+        Ok(stacks)
+    }
+}
+
+/// A record of an `.nv.info` section: an attribute with a block of bytes, or with a 16-bit value.
+enum Record<'a> {
+    Block(u8, &'a [u8]),
+    Value(u8, u16),
+}
+
+/// Returns the records of an `.nv.info` section, each a format byte, an attribute byte, and a
+/// 16-bit value that, for a block, is the length of the bytes that follow.
+///
+/// For example, `04 0a 08 00` then 8 bytes is a block of attribute `0x0a`, and `03 19 20 00` is
+/// attribute `0x19` with the value 32.
+fn records(data: &[u8]) -> Result<Vec<Record<'_>>, String> {
+    let mut records = Vec::new();
+    let mut at = 0;
+    while at + 4 <= data.len() {
+        let (format, attribute) = (data[at], data[at + 1]);
+        let value = u16_at(data, at + 2).unwrap_or(0);
+        at += 4;
+        if format == FORMAT_BLOCK {
+            let end = at + value as usize;
+            let block = data
+                .get(at..end)
+                .ok_or_else(|| not_a_cubin("truncated launch information"))?;
+            records.push(Record::Block(attribute, block));
+            at = end;
+        } else {
+            records.push(Record::Value(attribute, value));
+        }
+    }
+    Ok(records)
 }
 
 /// Returns the null-terminated text at `offset` of `strings`.
@@ -259,6 +323,27 @@ mod tests {
         assert_eq!(k1.sass.len(), 0x980);
         assert_eq!(k1.registers, 26);
         assert_eq!((k1.param_offset, k1.param_size), (0x160, 40));
+        assert_eq!((k0.stack, k1.stack), (0, 0));
+    }
+
+    #[test]
+    fn a_kernel_with_a_local_array_needs_a_stack() {
+        // `ptxas -v` reports "64 bytes cumulative stack size" for its `.local` array
+        let kernels = parse(include_bytes!("testdata/stack.sm_75.cubin")).unwrap();
+        assert_eq!(kernels[0].name, "stone_k0");
+        assert_eq!(kernels[0].stack, 64);
+    }
+
+    #[test]
+    fn a_kernel_with_a_literal_pool_carries_its_bytes() {
+        // `xs * 3 + 1` over ints: ptxas keeps the 64-bit 1 in `.nv.constant2.stone_k0`
+        let cubin = include_bytes!("testdata/literals.sm_75.cubin");
+        let kernels = parse(cubin).unwrap();
+        assert_eq!(kernels[0].literals, [1, 0, 0, 0, 0, 0, 0, 0]);
+        assert_eq!(kernels[1..].len(), 0);
+        assert_eq!(unplaceable_sections(cubin).unwrap(), Vec::<String>::new());
+        let two = parse(TWO_KERNELS).unwrap();
+        assert!(two.iter().all(|kernel| kernel.literals.is_empty()));
     }
 
     #[test]
@@ -272,7 +357,6 @@ mod tests {
     #[test]
     fn sections_that_hold_data_or_relocations_are_unplaceable() {
         for name in [
-            ".nv.constant2.stone_k0",
             ".nv.constant3",
             ".nv.global",
             ".nv.global.init",
@@ -285,6 +369,7 @@ mod tests {
         for name in [
             ".text.stone_k0",
             ".nv.constant0.stone_k0",
+            ".nv.constant2.stone_k0",
             ".nv.info.stone_k0",
             ".nv.shared.stone_k0",
             ".nv.callgraph",

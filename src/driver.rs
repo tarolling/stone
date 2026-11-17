@@ -83,7 +83,23 @@ pub fn load(
     source: &str,
     sources: &dyn Sources,
 ) -> (SourceMap, Result<Checked, Diagnostics>) {
-    check_linked(project::link(entry, source, sources), sources)
+    load_with(entry, source, sources, &[])
+}
+
+/// Loads a program as [`load`] does, linking the modules written in stone named in `required`
+/// too, as a build that launches kernels links the GPU's driver ([`crate::stdlib::gpu::NV_MODULE`]).
+///
+/// For example, `load_with(entry, source, sources, &[])` is `load(entry, source, sources)`.
+pub fn load_with(
+    entry: &Path,
+    source: &str,
+    sources: &dyn Sources,
+    required: &[&str],
+) -> (SourceMap, Result<Checked, Diagnostics>) {
+    check_linked(
+        project::link_with(entry, source, sources, required),
+        sources,
+    )
 }
 
 /// Checks a program that linking gave, as [`load`] does, writing its `stone.lock` through
@@ -585,7 +601,8 @@ fn compile_with(
 ///
 /// For example, a cubin whose kernels keep a table of constants in `.nv.constant2` cannot be
 /// loaded without placing that section, which stone does not do, so its device's code is left
-/// out of the image and the program computes on the processor on those GPUs.
+/// out of the image and the program computes on the processor on those GPUs. The same holds for
+/// a kernel that needs a stack, since launches give a thread no local memory.
 fn embeddable(
     code: &image::DeviceCode,
     numbered: &codegen::gpu::kernel::Numbered,
@@ -600,6 +617,14 @@ fn embeddable(
              the processor there",
             code.device,
             unplaceable.join(", ")
+        ));
+    }
+    // the runtime launches with no local memory, which a stack lives in
+    if let Some(kernel) = cubin.kernels.iter().find(|kernel| kernel.stack > 0) {
+        return Err(format!(
+            "the kernel {} for {} needs {} bytes of stack, which a program does not give it \
+             yet, so it computes on the processor there",
+            kernel.name, code.device, kernel.stack
         ));
     }
     image::build(
@@ -931,6 +956,28 @@ mod tests {
     use crate::checker::Type;
     use crate::codegen::ir::lower::TEST_VARIABLE;
     use crate::span::FileId;
+
+    #[test]
+    fn a_linux_program_leaves_out_kernels_that_need_a_stack() {
+        let bytes = include_bytes!("codegen/gpu/testdata/stack.sm_75.cubin").to_vec();
+        let kernels = cubin::parse(&bytes).unwrap();
+        let device = "sm_75".parse().unwrap();
+        let code = image::DeviceCode {
+            device,
+            cubin: Some(image::Cubin { bytes, kernels }),
+            ptx: String::new(),
+        };
+        let numbered = codegen::gpu::kernel::Numbered {
+            kernels: Vec::new(),
+            record_kernel: Vec::new(),
+            shapes: Vec::new(),
+        };
+        assert_eq!(
+            embeddable(&code, &numbered).unwrap_err(),
+            "the kernel stone_k0 for sm_75 needs 64 bytes of stack, which a program does not \
+             give it yet, so it computes on the processor there"
+        );
+    }
 
     #[test]
     fn windows_programs_cannot_use_unix_sockets_yet() {

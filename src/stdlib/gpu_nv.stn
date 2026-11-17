@@ -1,0 +1,786 @@
+// The internal `gpu_nv` module, which a Linux program built with `--gpu` is linked with: it runs
+// the kernels of the program's GPU image on an NVIDIA GPU, talking to the kernel driver through
+// its device files, with no C library and no CUDA library.
+//
+// The first launch opens the driver, makes a channel with a compute engine, and copies the
+// image's machine code for the GPU into GPU memory; every launch then copies the lists in,
+// writes the kernel's parameters and launch description, pushes the launch, waits for it, and
+// copies the result out. Anything unexpected makes it give up for good, and the program computes
+// on the processor instead. `STONE_GPU=off` skips the GPU, and `STONE_GPU=require` makes a launch
+// that cannot run give a refusal code, which the program reports as an error.
+//
+// It reaches the system through `gpu_sys`, which only stone's own modules may use.
+
+use os
+use time
+use gpu_sys
+
+// The driver major version whose interface this module speaks.
+const driver_major = 595
+
+// The kinds of refusal, the low four bits of a refusal code, whose other bits hold a detail.
+const no_driver = 1
+const no_device = 2
+const no_code = 3
+const driver_error = 4
+const too_many_values = 5
+const timed_out = 6
+
+// The size of the state block, whose first page holds the fields below and the rest scratch.
+const block_size = 0x5000
+
+// Where the scratch space starts: request structs, then parameters, then a larger buffer.
+const requests = 0x1000
+const params = 0x1100
+const extra = 0x4000
+
+// The fields of the state block, 8 bytes each.
+const at_ctl = 0
+const at_uvm = 8
+const at_mgr = 16
+const at_dev = 24
+const at_minor = 32
+const at_root = 40
+const at_device = 48
+const at_subdevice = 56
+const at_virtmem = 64
+const at_vaspace = 72
+const at_uuid0 = 80
+const at_uuid1 = 88
+const at_doorbell = 96
+const at_token = 104
+const at_ring = 112
+const at_gp_put = 120
+const at_put = 128
+const at_sm = 136
+const at_pushes = 144
+const at_semaphore = 152
+const at_value = 160
+const at_memory = 168
+const at_handle = 176
+const at_require = 184
+const at_table = 192
+const at_code_base = 200
+const at_code_lo = 208
+const at_launch = 216
+const at_arena = 224
+const at_arena_size = 232
+
+// The number of GPFIFO entries in the channel's ring.
+const entries = 0x10000
+
+// The first GPU virtual address memory is placed at.
+const first_memory = 0x1000000000
+
+// The shared and local memory windows of the compute engine.
+const shared_window = 0x729300000000
+const local_window = 0x729400000000
+
+// The number of threads per block.
+const block = 256
+
+// The most parameters a kernel may take.
+const max_params = 64
+
+// How long a launch may take before the GPU is given up, in seconds.
+const wait_limit = 5.0
+
+////////////////////////////////////////////////////////////////
+// helpers
+////////////////////////////////////////////////////////////////
+
+// Returns the low 32 bits of `v`.
+fn low(v: int) -> int:
+    ret v & 0xFFFFFFFF
+
+// Returns bits 32 to 63 of `v`.
+fn high(v: int) -> int:
+    ret (v >> 32) & 0xFFFFFFFF
+
+// Rounds `v` up to a multiple of `to`, a power of two.
+fn align(v: int, to: int) -> int:
+    ret (v + to - 1) & ~(to - 1)
+
+// Zeroes `size` bytes at `at`, a multiple of 8.
+fn clear(at: int, size: int):
+    i = 0
+    while i < size:
+        gpu_sys.poke64(at + i, 0)
+        i += 8
+
+// Returns the field at offset `at` of the state block `s`.
+fn field(s: int, at: int) -> int:
+    ret gpu_sys.peek64(s + at)
+
+// Sets the field at offset `at` of the state block `s` to `v`.
+fn keep(s: int, at: int, v: int):
+    gpu_sys.poke64(s + at, v)
+
+// Sets bits `lo` to `hi` of the 32-bit words at `at` to `v`, a field that never crosses a word.
+fn set_bits(at: int, hi: int, lo: int, v: int):
+    word = at + lo / 32 * 4
+    shift = lo % 32
+    mask = (1 << (hi - lo + 1)) - 1
+    old = gpu_sys.peek32(word) & ~(mask << shift)
+    gpu_sys.poke32(word, old | ((v & mask) << shift))
+
+// Writes a push buffer method at `at`: a header for `values` written from register `offset` of
+// subchannel `sub` on, then the values. Returns where the next method goes.
+fn method(at: int, sub: int, offset: int, values: list[int]) -> int:
+    header = (2 << 28) | (values.len() << 16) | (sub << 13) | (offset >> 2)
+    gpu_sys.poke32(at, header)
+    i = 0
+    for v in values:
+        gpu_sys.poke32(at + 4 + i * 4, v & 0xFFFFFFFF)
+        i += 1
+    ret at + 4 + values.len() * 4
+
+////////////////////////////////////////////////////////////////
+// driver calls
+////////////////////////////////////////////////////////////////
+
+// Returns the refusal code of `kind` with `detail`.
+fn refusal(kind: int, detail: int) -> int:
+    ret kind + 16 * detail
+
+// Returns the request number of the resource manager's ioctl `number`, whose struct is `size`
+// bytes.
+fn rm_request(number: int, size: int) -> int:
+    ret (3 << 30) | ((size & 0x1FFF) << 16) | (0x46 << 8) | number
+
+// Gives an error for a driver call that returned `back`, a negative error number on failure, and
+// reported `status`, unless both say it worked.
+fn checked(back: int, status: int) -> result[int, int]:
+    if back < 0:
+        ret err(refusal(driver_error, -back))
+    if status != 0:
+        ret err(refusal(driver_error, status))
+    ret ok(0)
+
+// Makes an object of `class` under `parent`, with its parameters at `p` (0 for none), and
+// returns its handle.
+fn alloc_object(s: int, parent: int, class: int, p: int) -> result[int, int]:
+    r = s + requests
+    clear(r, 32)
+    gpu_sys.poke32(r, field(s, at_root))
+    gpu_sys.poke32(r + 4, parent)
+    gpu_sys.poke32(r + 12, class)
+    gpu_sys.poke64(r + 16, p)
+    checked(gpu_sys.ioctl(field(s, at_ctl), rm_request(0x2B, 32), r), gpu_sys.peek32(r + 28))?
+    ret ok(gpu_sys.peek32(r + 8))
+
+// Runs the control `command` of `object` with its `size` bytes of parameters at `p`.
+fn control(s: int, object: int, command: int, p: int, size: int) -> result[int, int]:
+    r = s + requests
+    clear(r, 32)
+    gpu_sys.poke32(r, field(s, at_root))
+    gpu_sys.poke32(r + 4, object)
+    gpu_sys.poke32(r + 8, command)
+    gpu_sys.poke64(r + 16, p)
+    gpu_sys.poke32(r + 24, size)
+    ret checked(gpu_sys.ioctl(field(s, at_ctl), rm_request(0x2A, 32), r), gpu_sys.peek32(r + 28))
+
+// Runs the unified memory ioctl `command` with its parameters at `p`, whose status is a 32-bit
+// word at `status_at`.
+fn uvm(s: int, command: int, p: int, status_at: int) -> result[int, int]:
+    ret checked(gpu_sys.ioctl(field(s, at_uvm), command, p), gpu_sys.peek32(p + status_at))
+
+// Opens the device file of the GPU numbered `minor` and ties it to the control file.
+fn device_file(s: int, minor: int) -> result[int, int]:
+    fd = gpu_sys.open("/dev/nvidia{minor}")
+    if fd < 0:
+        ret err(refusal(driver_error, -fd))
+    r = s + requests
+    clear(r, 8)
+    gpu_sys.poke32(r, field(s, at_ctl))
+    back = gpu_sys.ioctl(fd, rm_request(0xC9, 4), r)
+    if back < 0:
+        gpu_sys.close(fd)
+        ret err(refusal(driver_error, -back))
+    ret ok(fd)
+
+// Maps `size` bytes of the object `handle` into the program's memory and returns their address.
+fn map_object(s: int, handle: int, size: int) -> result[int, int]:
+    fd = device_file(s, field(s, at_minor))?
+    r = s + requests
+    clear(r, 56)
+    gpu_sys.poke32(r, field(s, at_root))
+    gpu_sys.poke32(r + 4, field(s, at_device))
+    gpu_sys.poke32(r + 8, handle)
+    gpu_sys.poke64(r + 24, size)
+    gpu_sys.poke32(r + 48, fd)
+    checked(gpu_sys.ioctl(field(s, at_ctl), rm_request(0x4E, 56), r), gpu_sys.peek32(r + 40))?
+    address = gpu_sys.mmap(0, size, 3, 1, fd, 0)
+    if address < 0:
+        ret err(refusal(driver_error, -address))
+    ret ok(address)
+
+////////////////////////////////////////////////////////////////
+// memory
+////////////////////////////////////////////////////////////////
+
+// Returns the GPU address of `size` bytes no other memory uses.
+fn reserve(s: int, size: int) -> int:
+    va = align(field(s, at_memory), 0x1000)
+    keep(s, at_memory, va + size)
+    ret va
+
+// Makes `size` bytes of memory that the processor and the GPU see at the same address, and
+// returns that address and the memory's handle.
+fn alloc(s: int, size: int) -> result[tuple[int, int], int]:
+    size = align(size, 0x1000)
+    va = reserve(s, size)
+    // fixed, without replacing, anonymous, and shared
+    mapped = gpu_sys.mmap(va, size, 3, 0x100021, -1, 0)
+    if mapped != va:
+        if mapped < 0:
+            ret err(refusal(driver_error, -mapped))
+        gpu_sys.munmap(mapped, size)
+        ret err(refusal(driver_error, 0))
+    handle = field(s, at_handle) + 1
+    keep(s, at_handle, handle)
+    // the memory as an object of the operating system's pages
+    r = s + requests
+    clear(r, 56)
+    gpu_sys.poke32(r, field(s, at_root))
+    gpu_sys.poke32(r + 4, field(s, at_device))
+    gpu_sys.poke32(r + 8, handle)
+    gpu_sys.poke32(r + 12, 0x71)
+    gpu_sys.poke32(r + 16, (1 << 4) | (1 << 12) | (1 << 30))
+    gpu_sys.poke64(r + 24, va)
+    gpu_sys.poke64(r + 32, size - 1)
+    gpu_sys.poke32(r + 48, 0xFFFFFFFF)
+    checked(gpu_sys.ioctl(field(s, at_dev), rm_request(0x27, 56), r), gpu_sys.peek32(r + 40))?
+    // unified memory keeps its hands off the range
+    p = s + params
+    clear(p, 24)
+    gpu_sys.poke64(p, va)
+    gpu_sys.poke64(p + 8, size)
+    uvm(s, 0x49, p, 16)?
+    // the GPU's mapping, at the same address
+    clear(r, 64)
+    gpu_sys.poke32(r, field(s, at_root))
+    gpu_sys.poke32(r + 4, field(s, at_device))
+    gpu_sys.poke32(r + 8, field(s, at_virtmem))
+    gpu_sys.poke32(r + 12, handle)
+    gpu_sys.poke64(r + 24, size)
+    gpu_sys.poke32(r + 32, (1 << 8) | (1 << 4) | (1 << 15))
+    gpu_sys.poke64(r + 48, va)
+    checked(gpu_sys.ioctl(field(s, at_ctl), rm_request(0x57, 64), r), gpu_sys.peek32(r + 56))?
+    if gpu_sys.peek64(r + 48) != va:
+        ret err(refusal(driver_error, 0))
+    // and its mapping in the channel's address space
+    clear(p, 0x2430)
+    gpu_sys.poke64(p, va)
+    gpu_sys.poke64(p + 8, size)
+    gpu_sys.poke64(p + 24, field(s, at_uuid0))
+    gpu_sys.poke64(p + 32, field(s, at_uuid1))
+    gpu_sys.poke32(p + 40, 1)
+    gpu_sys.poke64(p + 0x2418, 1)
+    gpu_sys.poke32(p + 0x2420, field(s, at_ctl))
+    gpu_sys.poke32(p + 0x2424, field(s, at_root))
+    gpu_sys.poke32(p + 0x2428, handle)
+    uvm(s, 0x21, p, 0x242C)?
+    ret ok((va, handle))
+
+////////////////////////////////////////////////////////////////
+// submitting work
+////////////////////////////////////////////////////////////////
+
+// Runs the methods written from 24 bytes into the push buffer up to `end`, and waits until the
+// GPU has run them.
+fn submit(s: int, end: int) -> result[int, int]:
+    pushes = field(s, at_pushes)
+    sem = field(s, at_semaphore)
+    t = field(s, at_value)
+    // wait for the work before, then the payload, then release the semaphore with `t`
+    method(pushes, 0, 0x5C, [low(sem), high(sem), low(t - 1), high(t - 1), 3 | (1 << 24)])
+    last = method(end, 0, 0x5C, [low(sem), high(sem), low(t), high(t), 1 | (1 << 20) | (1 << 24) | (1 << 25)])
+    last = method(last, 0, 0x20, [0])
+    words = (last - pushes) / 4
+    put = field(s, at_put)
+    e = field(s, at_ring) + 8 * (put % entries)
+    gpu_sys.poke32(e, pushes & 0xFFFFFFFC)
+    gpu_sys.poke32(e + 4, high(pushes) | (1 << 9) | (words << 10))
+    put += 1
+    keep(s, at_put, put)
+    gpu_sys.fence()
+    gpu_sys.poke32(field(s, at_gp_put), put % entries)
+    gpu_sys.fence()
+    gpu_sys.poke32(field(s, at_doorbell), field(s, at_token))
+    deadline = time.clock() + wait_limit
+    while gpu_sys.peek64(sem) < t:
+        if time.clock() > deadline:
+            ret err(refusal(timed_out, 0))
+    gpu_sys.fence()
+    keep(s, at_value, t + 1)
+    ret ok(0)
+
+////////////////////////////////////////////////////////////////
+// starting
+////////////////////////////////////////////////////////////////
+
+// Returns the number before the first `.` of the text at `p`, such as 595 for "595.99.02".
+fn leading_number(p: int) -> int:
+    n = 0
+    i = 0
+    while i < 16:
+        c = gpu_sys.peek32(p + i) & 0xFF
+        if c < 48 or c > 57:
+            ret n
+        n = n * 10 + c - 48
+        i += 1
+    ret n
+
+// Opens the driver's files, makes the resource manager's root client, and checks that the driver
+// is a version whose calls this module was written for.
+fn open_driver(s: int) -> result[int, int]:
+    ctl = gpu_sys.open("/dev/nvidiactl")
+    if ctl < 0:
+        ret err(refusal(no_driver, 0))
+    keep(s, at_ctl, ctl)
+    uvm_fd = gpu_sys.open("/dev/nvidia-uvm")
+    if uvm_fd < 0:
+        ret err(refusal(no_driver, 0))
+    keep(s, at_uvm, uvm_fd)
+    keep(s, at_root, alloc_object(s, 0, 0x41, 0)?)
+    p = s + params
+    clear(p, 1032)
+    control(s, field(s, at_root), 0x13E, p, 1032)?
+    major = leading_number(p)
+    if major != driver_major:
+        ret err(refusal(no_driver, major))
+    clear(p, 16)
+    uvm(s, 0x30000001, p, 8)?
+    // unified memory's manager is a second file of the same device
+    mgr = gpu_sys.open("/dev/nvidia-uvm")
+    if mgr < 0:
+        ret err(refusal(no_driver, 0))
+    keep(s, at_mgr, mgr)
+    clear(p, 8)
+    gpu_sys.poke32(p, uvm_fd)
+    checked(gpu_sys.ioctl(mgr, 0x4B, p), 0)?
+    ret ok(0)
+
+// Finds the first GPU, opens its device file, and makes its device, subdevice, and memory
+// objects.
+fn open_device(s: int) -> result[int, int]:
+    p = s + params
+    clear(p, 0x1200)
+    checked(gpu_sys.ioctl(field(s, at_ctl), rm_request(0xC8, 0x1200), p), 0)?
+    found = -1
+    i = 0
+    while i < 64 and found < 0:
+        if gpu_sys.peek32(p + i * 72) & 0xFF != 0:
+            found = i
+        i += 1
+    if found < 0:
+        ret err(refusal(no_device, 0))
+    gpu_id = gpu_sys.peek32(p + found * 72 + 16)
+    minor = gpu_sys.peek32(p + found * 72 + 56)
+    keep(s, at_minor, minor)
+    keep(s, at_dev, device_file(s, minor)?)
+    root = field(s, at_root)
+    clear(p, 32)
+    gpu_sys.poke32(p, gpu_id)
+    control(s, root, 0x205, p, 32)?
+    instance = gpu_sys.peek32(p + 8)
+    clear(p, 56)
+    gpu_sys.poke32(p, instance)
+    gpu_sys.poke32(p + 4, root)
+    keep(s, at_device, alloc_object(s, root, 0x80, p)?)
+    clear(p, 4)
+    keep(s, at_subdevice, alloc_object(s, field(s, at_device), 0x2080, p)?)
+    clear(p, 24)
+    gpu_sys.poke64(p + 8, 0x1FFFFFFFFFFFF)
+    keep(s, at_virtmem, alloc_object(s, field(s, at_device), 0x70, p)?)
+    ret ok(0)
+
+// Returns the first of `wanted` among the `count` classes listed at `list`, or 0 if none is.
+fn pick(list: int, count: int, wanted: list[int]) -> int:
+    for class in wanted:
+        i = 0
+        while i < count:
+            if gpu_sys.peek32(list + 4 * i) == class:
+                ret class
+            i += 1
+    ret 0
+
+// Returns the compute, user mode, and channel classes of the device, preferring the newest.
+fn classes(s: int) -> result[tuple[int, int, int], int]:
+    p = s + params
+    clear(p, 16)
+    control(s, field(s, at_device), 0x800201, p, 16)?
+    count = gpu_sys.peek32(p).min(1024)
+    list = s + extra
+    clear(list, 4 * count)
+    clear(p, 16)
+    gpu_sys.poke32(p, count)
+    gpu_sys.poke64(p + 8, list)
+    control(s, field(s, at_device), 0x800201, p, 16)?
+    compute = pick(list, count, [0xC9C0, 0xC7C0])
+    usermode = pick(list, count, [0xC661, 0xC461])
+    channel = pick(list, count, [0xC96F, 0xC56F])
+    if compute == 0 or usermode == 0 or channel == 0:
+        ret err(refusal(no_device, 0))
+    ret ok((compute, usermode, channel))
+
+// Maps the doorbell, makes the address space, and registers the GPU and the address space with
+// unified memory.
+fn open_space(s: int, usermode_class: int) -> result[int, int]:
+    p = s + params
+    usermode = alloc_object(s, field(s, at_subdevice), usermode_class, 0)?
+    keep(s, at_doorbell, map_object(s, usermode, 0x10000)? + 0x90)
+    clear(p, 56)
+    gpu_sys.poke32(p + 4, 0x48)
+    gpu_sys.poke64(p + 8, 0x1FFFFFB000000)
+    gpu_sys.poke64(p + 40, 0x1000)
+    keep(s, at_vaspace, alloc_object(s, field(s, at_device), 0x90F1, p)?)
+    // the GPU's identifier, in binary
+    clear(p, 268)
+    gpu_sys.poke32(p + 4, 2)
+    gpu_sys.poke32(p + 8, 16)
+    control(s, field(s, at_subdevice), 0x2080014A, p, 268)?
+    keep(s, at_uuid0, gpu_sys.peek64(p + 12))
+    keep(s, at_uuid1, gpu_sys.peek64(p + 20))
+    clear(p, 40)
+    gpu_sys.poke64(p, field(s, at_uuid0))
+    gpu_sys.poke64(p + 8, field(s, at_uuid1))
+    gpu_sys.poke32(p + 24, 0xFFFFFFFF)
+    uvm(s, 0x25, p, 36)?
+    clear(p, 32)
+    gpu_sys.poke64(p, field(s, at_uuid0))
+    gpu_sys.poke64(p + 8, field(s, at_uuid1))
+    gpu_sys.poke32(p + 16, field(s, at_ctl))
+    gpu_sys.poke32(p + 20, field(s, at_root))
+    gpu_sys.poke32(p + 24, field(s, at_vaspace))
+    uvm(s, 0x19, p, 28)?
+    ret ok(0)
+
+// Makes a channel group with one channel of `channel_class` that runs `compute_class` work, and
+// keeps where its ring, its put pointer, and its doorbell token are.
+fn open_channel(s: int, compute_class: int, channel_class: int) -> result[int, int]:
+    p = s + params
+    device = field(s, at_device)
+    clear(p, 20)
+    gpu_sys.poke32(p + 12, 1)
+    group = alloc_object(s, device, 0xA06C, p)?
+    // before the parameters below, since making memory uses their space
+    area, area_handle = alloc(s, 0x300000)?
+    _, notifier_handle = alloc(s, 0x1000)?
+    clear(p, 12)
+    gpu_sys.poke32(p, field(s, at_vaspace))
+    gpu_sys.poke32(p + 4, 1)
+    share = alloc_object(s, group, 0x9067, p)?
+    clear(p, 368)
+    gpu_sys.poke32(p, notifier_handle)
+    gpu_sys.poke32(p + 4, area_handle)
+    gpu_sys.poke64(p + 8, area)
+    gpu_sys.poke32(p + 16, entries)
+    gpu_sys.poke32(p + 24, share)
+    gpu_sys.poke32(p + 32, area_handle)
+    gpu_sys.poke64(p + 64, entries * 8)
+    gpfifo = alloc_object(s, group, channel_class, p)?
+    alloc_object(s, gpfifo, compute_class, 0)?
+    clear(p, 8)
+    gpu_sys.poke32(p, 0xFFFFFFFF)
+    control(s, gpfifo, 0xC36F0108, p, 4)?
+    keep(s, at_token, gpu_sys.peek32(p))
+    clear(p, 56)
+    gpu_sys.poke64(p, field(s, at_uuid0))
+    gpu_sys.poke64(p + 8, field(s, at_uuid1))
+    gpu_sys.poke32(p + 16, field(s, at_ctl))
+    gpu_sys.poke32(p + 20, field(s, at_root))
+    gpu_sys.poke32(p + 24, gpfifo)
+    gpu_sys.poke64(p + 32, reserve(s, 0x4000000))
+    gpu_sys.poke64(p + 40, 0x4000000)
+    uvm(s, 0x1B, p, 48)?
+    // schedule the group
+    clear(p, 8)
+    gpu_sys.poke32(p, 1)
+    control(s, group, 0xA06C0101, p, 3)?
+    keep(s, at_ring, area)
+    keep(s, at_gp_put, area + entries * 8 + 0x8C)
+    ret ok(0)
+
+// Reads the GPU's SM version, makes the push, semaphore, and launch memory, and points the
+// compute class at its shared and local memory windows.
+fn prepare(s: int, compute_class: int) -> result[int, int]:
+    p = s + params
+    items = s + extra
+    clear(items, 8)
+    gpu_sys.poke32(items, 12)
+    clear(p, 32)
+    gpu_sys.poke32(p, 1)
+    gpu_sys.poke64(p + 8, items)
+    control(s, field(s, at_subdevice), 0x20801201, p, 32)?
+    keep(s, at_sm, gpu_sys.peek32(items + 4))
+    pushes, _ = alloc(s, 0x10000)?
+    keep(s, at_pushes, pushes)
+    semaphore, _ = alloc(s, 0x1000)?
+    keep(s, at_semaphore, semaphore)
+    keep(s, at_value, 1)
+    launch, _ = alloc(s, 0x1000)?
+    keep(s, at_launch, launch)
+    end = method(pushes + 24, 1, 0, [compute_class])
+    end = method(end, 1, 0x7B0, [high(shared_window), low(shared_window)])
+    end = method(end, 1, 0x2A0, [high(local_window), low(local_window)])
+    submit(s, end)?
+    ret ok(0)
+
+////////////////////////////////////////////////////////////////
+// the program's kernels
+////////////////////////////////////////////////////////////////
+
+// Returns where the image's shapes start.
+fn shapes_at(image: int) -> int:
+    ret image + align(32 + 4 * gpu_sys.peek32(image + 16), 8)
+
+// Picks the newest machine code in the image that this GPU runs and copies all of it into GPU
+// memory once, keeping its kernel table and where its code went.
+fn load_code(s: int) -> result[int, int]:
+    image = gpu_sys.image()
+    sm = field(s, at_sm)
+    major = sm >> 8
+    minor = sm & 0xFF
+    gpu = major * 10 + minor
+    if gpu_sys.peek64(image) != 0x555047454E4F5453 or gpu_sys.peek32(image + 8) != 3:
+        ret err(refusal(no_code, major * 256 + minor))
+    kernels = gpu_sys.peek32(image + 20)
+    devices = shapes_at(image) + 16 * kernels
+    best = -1
+    best_key = -1
+    i = 0
+    while i < gpu_sys.peek32(image + 12):
+        d = devices + 48 * i
+        d_sm = gpu_sys.peek32(d)
+        specific = gpu_sys.peek32(d + 4)
+        fits = d_sm / 10 == gpu / 10 and d_sm <= gpu and gpu_sys.peek64(d + 8) != 0
+        if fits and (specific == 0 or d_sm == gpu) and d_sm * 2 + specific > best_key:
+            best = d
+            best_key = d_sm * 2 + specific
+        i += 1
+    if best < 0 or kernels == 0:
+        ret err(refusal(no_code, major * 256 + minor))
+    table = image + gpu_sys.peek64(best + 8)
+    lo = gpu_sys.peek64(table)
+    hi = lo
+    k = 0
+    while k < kernels:
+        e = table + 48 * k
+        lo = lo.min(gpu_sys.peek64(e))
+        hi = hi.max(gpu_sys.peek64(e) + gpu_sys.peek64(e + 8))
+        k += 1
+    // room past the end for the instruction prefetch
+    base, _ = alloc(s, align(hi - lo, 0x1000) + 0x1000)?
+    gpu_sys.copy(base, image + lo, hi - lo)
+    keep(s, at_table, table)
+    keep(s, at_code_base, base)
+    keep(s, at_code_lo, lo)
+    ret ok(0)
+
+////////////////////////////////////////////////////////////////
+// starting
+////////////////////////////////////////////////////////////////
+
+// Returns what a launch gives once the GPU gave up with `state`: minus the refusal code under
+// `STONE_GPU=require`, else 0, so the processor computes instead.
+fn refused(state: int) -> int:
+    m = -state
+    if m % 2 == 1:
+        ret -(m / 2)
+    ret 0
+
+// Opens the driver and the GPU, makes a channel, and loads the program's kernels.
+fn open_all(s: int) -> result[int, int]:
+    open_driver(s)?
+    open_device(s)?
+    compute, usermode, channel = classes(s)?
+    open_space(s, usermode)?
+    keep(s, at_memory, first_memory)
+    keep(s, at_handle, 0x1000)
+    open_channel(s, compute, channel)?
+    prepare(s, compute)?
+    load_code(s)?
+    ret ok(0)
+
+// Starts the GPU for the first launch and returns the state word: the address of the state
+// block when the GPU is ready, else minus twice the refusal code, plus 1 under
+// `STONE_GPU=require`.
+fn start() -> int:
+    setting = os.env("STONE_GPU").unwrap_or("")
+    if setting == "off":
+        ret -2
+    require = 0
+    if setting == "require":
+        require = 1
+    s = gpu_sys.mmap(0, block_size, 3, 0x22, -1, 0)
+    if s < 0:
+        ret -(refusal(driver_error, -s) * 2 + require)
+    keep(s, at_require, require)
+    match open_all(s):
+        case ok(_):
+            ret s
+        case err(code):
+            ret -(code * 2 + require)
+
+////////////////////////////////////////////////////////////////
+// launching
+////////////////////////////////////////////////////////////////
+
+// Writes the queue meta data (version 3) at `at` that runs the code at `program` (`size` bytes,
+// `registers` per thread) over `grid` blocks with constant bank 0 at `bank` (`bank_size` bytes)
+// and, unless `literals_size` is 0, constant bank 2 at `literals`.
+fn write_qmd(at: int, sm: int, program: int, size: int, registers: int, grid: int, bank: int, bank_size: int, literals: int, literals_size: int):
+    clear(at, 0x100)
+    set_bits(at, 583, 580, 3)
+    set_bits(at, 134, 134, 1)
+    set_bits(at, 133, 128, 0x3F)
+    set_bits(at, 1567, 1536, low(program))
+    set_bits(at, 1584, 1568, high(program))
+    set_bits(at, 287, 256, (program >> 8) & 0xFFFFFFFF)
+    set_bits(at, 1640, 1632, program >> 40)
+    set_bits(at, 1649, 1641, (size >> 8).min(0x1FF))
+    set_bits(at, 561, 544, 0x400)
+    set_bits(at, 656, 648, registers.max(16))
+    set_bits(at, 1623, 1600, 0)
+    for bit in [186, 187, 188, 189, 378, 382]:
+        set_bits(at, bit, bit, 1)
+    set_bits(at, 767, 763, 1)
+    set_bits(at, 369, 368, 1)
+    set_bits(at, 567, 562, 9)
+    set_bits(at, 662, 657, 9)
+    set_bits(at, 574, 569, 0x1A)
+    set_bits(at, 1663, 1656, ((sm & 0xF00) >> 4) | (sm & 0xF))
+    set_bits(at, 415, 384, grid)
+    set_bits(at, 431, 416, 1)
+    set_bits(at, 463, 448, 1)
+    set_bits(at, 607, 592, block)
+    set_bits(at, 623, 608, 1)
+    set_bits(at, 639, 624, 1)
+    set_bits(at, 1074, 1074, 1)
+    set_bits(at, 640, 640, 1)
+    set_bits(at, 1055, 1024, low(bank))
+    set_bits(at, 1072, 1056, high(bank))
+    set_bits(at, 1087, 1075, bank_size)
+    if literals_size > 0:
+        // bank 2's fields are bank 0's, two 64-bit slots on
+        set_bits(at, 642, 642, 1)
+        set_bits(at, 1183, 1152, low(literals))
+        set_bits(at, 1200, 1184, high(literals))
+        set_bits(at, 1202, 1202, 1)
+        set_bits(at, 1215, 1203, align(literals_size, 16))
+
+// Returns the state word, starting the GPU on the first launch.
+fn ready() -> int:
+    state = gpu_sys.state()
+    if state == 0:
+        state = start()
+        gpu_sys.set_state(state)
+    ret state
+
+// Gives the GPU up for good after `code` went wrong, and returns what the launch gives.
+fn give_up(s: int, code: int) -> int:
+    state = -(code * 2 + field(s, at_require))
+    gpu_sys.set_state(state)
+    ret refused(state)
+
+// Returns GPU memory of at least `size` bytes for a launch's lists, reusing the last launch's.
+fn arena(s: int, size: int) -> result[int, int]:
+    if size <= field(s, at_arena_size):
+        ret ok(field(s, at_arena))
+    grown = align(size.max(2 * field(s, at_arena_size)), 0x10000)
+    at, _ = alloc(s, grown)?
+    keep(s, at_arena, at)
+    keep(s, at_arena_size, grown)
+    ret ok(at)
+
+// Runs the kernel of record `record` over `args`: the result's elements, the length, then the
+// kernel's values, a list by its elements' address. Gives 1 when the GPU computed the result, 0
+// when the processor should, or a refusal's negative under `STONE_GPU=require`, and an error
+// when the GPU must be given up.
+fn run(s: int, record: int, args: list[int]) -> result[int, int]:
+    if args.len() < 2 or args[1] <= 0:
+        ret ok(0)
+    image = gpu_sys.image()
+    k = gpu_sys.peek32(image + 32 + 4 * record)
+    shape = shapes_at(image) + 16 * k
+    count = gpu_sys.peek32(shape)
+    fails = gpu_sys.peek32(shape + 4) & 1
+    lists = gpu_sys.peek64(shape + 8)
+    if count > max_params:
+        if field(s, at_require) == 1:
+            ret ok(-refusal(too_many_values, count))
+        ret ok(0)
+    entry = field(s, at_table) + 48 * k
+    param_offset = gpu_sys.peek32(entry + 20)
+    bank_size = param_offset + gpu_sys.peek32(entry + 24)
+    literals_size = gpu_sys.peek64(entry + 40)
+    if args.len() + fails != count or bank_size > 0x400 or literals_size > 0x400 or lists & 1 == 0:
+        ret ok(0)
+    n = args[1]
+    slot = align(n * 8, 256)
+    total = 0
+    i = 0
+    while i < args.len():
+        if (lists >> i) & 1 == 1:
+            total += slot
+        i += 1
+    at = arena(s, total)?
+    page = field(s, at_launch)
+    clear(page, 0x1000)
+    grid = ((n + block - 1) / block).min(0xFFFF)
+    // the dimensions a grid-stride loop reads, then the windows, then the parameters
+    i = 0
+    for w in [block, 1, 1, grid, 1, 1]:
+        gpu_sys.poke32(page + 4 * i, w)
+        i += 1
+    gpu_sys.poke64(page + 24, local_window)
+    gpu_sys.poke64(page + 32, shared_window)
+    gpu_sys.poke64(page + 40, 0xFFFDC0)
+    out = at
+    i = 0
+    while i < args.len():
+        v = args[i]
+        if (lists >> i) & 1 == 1:
+            // the kernel writes every element of the result, so only operands are copied in
+            if i > 0:
+                gpu_sys.copy(at, v, n * 8)
+            v = at
+            at += slot
+        gpu_sys.poke64(page + param_offset + 8 * i, v)
+        i += 1
+    flag = page + 0x800
+    if fails == 1:
+        gpu_sys.poke64(page + param_offset + 8 * args.len(), flag)
+    program = field(s, at_code_base) + gpu_sys.peek64(entry) - field(s, at_code_lo)
+    size = gpu_sys.peek64(entry + 8)
+    registers = gpu_sys.peek32(entry + 16)
+    // constant bank 2 holds the literals the code reads, such as a 64-bit 1
+    literals = page + 0xC00
+    if literals_size > 0:
+        gpu_sys.copy(literals, image + gpu_sys.peek64(entry + 32), literals_size)
+    write_qmd(page + 0x400, field(s, at_sm), program, size, registers, grid, page, bank_size, literals, literals_size)
+    // invalidate the shader caches, then send the queue meta data
+    end = method(field(s, at_pushes) + 24, 1, 0x1698, [1 | (1 << 4) | (1 << 12)])
+    end = method(end, 1, 0x2B4, [(page + 0x400) >> 8])
+    end = method(end, 1, 0x2C0, [9])
+    submit(s, end)?
+    if fails == 1 and gpu_sys.peek64(flag) != 0:
+        ret ok(0)
+    gpu_sys.copy(args[0], out, n * 8)
+    ret ok(1)
+
+// Runs the kernel of record `record` over `args` on the GPU, as `run` describes, starting the
+// driver on the first call. Gives 1 when the GPU computed the result, 0 when the processor
+// should, or `-(kind + 16 * detail)` when `STONE_GPU=require` refuses to compute on the
+// processor.
+pub fn launch(record: int, args: list[int]) -> int:
+    state = ready()
+    if state < 0:
+        ret refused(state)
+    match run(state, record, args):
+        case ok(v):
+            ret v
+        case err(code):
+            ret give_up(state, code)

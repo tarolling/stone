@@ -55,6 +55,7 @@ philosophy
 guides/packages
 guides/publishing
 guides/testing
+guides/gpu
 ```
 
 ```{toctree}

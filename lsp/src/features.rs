@@ -100,21 +100,23 @@ impl Document {
     /// For example, the prelude's `enum option[T]:` names a variant `none`, which no other file
     /// may, so it has no errors only when analyzed as the prelude.
     pub fn builtin(written: Written, text: &str, encoding: Encoding) -> Option<Self> {
-        let (source, entry) = match written {
-            Written::Prelude => (PRELUDE, String::new()),
-            // `use gui` loads the internal modules `gui` uses
-            Written::Module(module) => (
-                source_module(module)?,
-                match stone::stdlib::is_internal_module(module) {
-                    true => "use gui\n".to_string(),
-                    false => format!("use {module}\n"),
-                },
-            ),
+        let (source, entry, required) = match written {
+            Written::Prelude => (PRELUDE, String::new(), None),
+            // a program cannot use an internal module, so it is linked as required
+            Written::Module(module) => match stone::stdlib::is_internal_module(module) {
+                true => (source_module(module)?, String::new(), Some(module)),
+                false => (source_module(module)?, format!("use {module}\n"), None),
+            },
         };
         if text != source {
             return None;
         }
-        let linked = link(Path::new(DEFAULT_ENTRY), &entry, &MapSources::default());
+        let linked = stone::project::link_with(
+            Path::new(DEFAULT_ENTRY),
+            &entry,
+            &MapSources::default(),
+            required.as_slice(),
+        );
         let file = match written {
             Written::Prelude => FileId::PRELUDE,
             Written::Module(module) => {

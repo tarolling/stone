@@ -306,9 +306,13 @@ flagging a zero divisor for the program to report. No keyword marks the code for
 compiler finds it. An x86-64 Windows program launches the kernels through NVIDIA's driver,
 which it loads only when it runs, so the same executable computes on the processor on a machine
 without one; `STONE_GPU=off` keeps it there, and `STONE_GPU=require` makes it an error not to
-use the GPU. Launching on Linux, which needs a way to reach the GPU's driver from a program
-that uses no C library, and deciding when a list is large enough to be worth sending to the GPU,
-are future work, as are AMD GPUs.
+use the GPU. A Linux program, which uses no C library and so cannot load libcuda, speaks to
+NVIDIA's kernel driver itself, through ioctls on `/dev/nvidia*`, from a driver written in stone
+(`gpu_nv`) over a few native primitives, and runs the machine code `ptxas` made at build time;
+so far it knows driver version 595 and Ampere and Ada GPUs, and computes on the processor
+anywhere else. Deciding when a list is large enough to be worth sending to the GPU, keeping
+lists on the GPU between pieces of arithmetic, other drivers and generations, and AMD GPUs are
+future work.
 Vector code beyond arithmetic on lists (searching strings, comparing lists, summing them),
 splitting a value's live range around calls, and removing reference counts it can prove
 redundant beyond moves at last use are future work.

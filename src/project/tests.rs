@@ -1527,8 +1527,36 @@ fn only_stones_own_modules_can_use_net_sys() {
 }
 
 #[test]
+fn only_stones_own_modules_can_use_gpu_sys() {
+    assert_error(
+        &[("main.stn", "use gpu_sys\n")],
+        "main.stn",
+        "no module named 'gpu_sys'",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_required_module_links_without_a_use() {
+    let with = link_with(
+        Path::new("main.stn"),
+        "print(1)\n",
+        &sources_of(&[]),
+        &["gpu_nv"],
+    );
+    assert_eq!(with.diagnostics, []);
+    assert!(function_names(&with).contains(&"gpu_nv.launch".to_string()));
+    // without it, nothing names the driver
+    assert!(
+        !function_names(&linked(&[("main.stn", "print(1)\n")]))
+            .contains(&"gpu_nv.launch".to_string())
+    );
+}
+
+#[test]
 fn only_stones_own_modules_can_use_its_internal_modules_written_in_stone() {
-    for module in ["gui_x11", "gui_wire"] {
+    for module in ["gui_x11", "gui_wire", "gpu_nv"] {
         assert_error(
             &[("main.stn", &format!("use {module}\n"))],
             "main.stn",

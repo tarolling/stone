@@ -557,7 +557,12 @@ fn build(
             }
         };
         let file = &file;
-        let code = with_program(file, offline, |checked, sources| {
+        // a build that launches kernels on Linux runs them through the GPU's driver, in stone
+        let required: &[&str] = match devices.is_empty() {
+            true => &[],
+            false => &[stone::stdlib::gpu::NV_MODULE],
+        };
+        let code = with_program_requiring(file, offline, required, |checked, sources| {
             let targets = if unique.is_empty() {
                 vec![Target::host()?]
             } else {
@@ -865,11 +870,22 @@ fn with_program(
     offline: bool,
     action: impl FnOnce(&Checked, &SourceMap) -> Result<(), Box<dyn Error>>,
 ) -> ExitCode {
+    with_program_requiring(file, offline, &[], action)
+}
+
+/// Runs `action` as [`with_program`] does, on the program linked with the modules written in
+/// stone named in `required` too.
+fn with_program_requiring(
+    file: &str,
+    offline: bool,
+    required: &[&str],
+    action: impl FnOnce(&Checked, &SourceMap) -> Result<(), Box<dyn Error>>,
+) -> ExitCode {
     let Some(source) = read(file) else {
         return ExitCode::FAILURE;
     };
     deps::prepare(Path::new(file), offline);
-    let (sources, result) = driver::load(Path::new(file), &source, &FsSources);
+    let (sources, result) = driver::load_with(Path::new(file), &source, &FsSources, required);
     let err = match result {
         Ok(checked) => {
             let rendered: String = checked.warnings.iter().map(|d| sources.render(d)).collect();

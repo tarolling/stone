@@ -740,9 +740,11 @@ fn build_writes_ptx_for_each_gpu_beside_the_program() {
     }
 }
 
-/// Returns whether NVIDIA's `ptxas` runs, which a GPU build needs to write machine code.
+/// Returns whether NVIDIA's `ptxas` runs, which a GPU build needs to write machine code. Like the
+/// build, it runs the one `STONE_PTXAS` names if set.
 fn has_ptxas() -> bool {
-    Command::new("ptxas")
+    let ptxas = std::env::var_os("STONE_PTXAS").unwrap_or_else(|| "ptxas".into());
+    Command::new(ptxas)
         .arg("--version")
         .output()
         .is_ok_and(|output| output.status.success())
@@ -786,11 +788,11 @@ const TWO_KERNEL_PROGRAM: &str =
 fn embedded_image(exe: &Path) -> stone::codegen::gpu::image::Image {
     use stone::codegen::gpu::image;
     let bytes = std::fs::read(exe).unwrap();
-    let at = bytes
-        .windows(image::MAGIC.len())
-        .position(|window| window == image::MAGIC)
-        .expect("the executable holds an image");
-    image::parse(&bytes[at..]).unwrap()
+    // the driver's code holds the magic too, as the immediate it checks the image against
+    (0..bytes.len())
+        .filter(|&at| bytes[at..].starts_with(image::MAGIC))
+        .find_map(|at| image::parse(&bytes[at..]).ok())
+        .expect("the executable holds an image")
 }
 
 // only Linux programs carry the image so far
@@ -894,6 +896,22 @@ fn a_gpu_build_without_ptxas_embeds_an_image_with_no_devices() {
     assert_eq!(
         String::from_utf8_lossy(&ran.stdout),
         "[2.5, 4.25]\n[2.0, 8.0]\n"
+    );
+    let off = Command::new(&exe).env("STONE_GPU", "off").output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&off.stdout),
+        "[2.5, 4.25]\n[2.0, 8.0]\n"
+    );
+    // whether or not this machine has a driver, no GPU can run an image without code
+    let required = Command::new(&exe)
+        .env("STONE_GPU", "require")
+        .output()
+        .unwrap();
+    assert_eq!(required.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&required.stderr);
+    assert!(
+        stderr.contains(":3:7: error: no GPU ran this program's kernels: "),
+        "{stderr}"
     );
 }
 

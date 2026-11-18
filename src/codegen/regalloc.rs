@@ -150,6 +150,7 @@ pub fn float_vregs(function: &Function) -> HashSet<VReg> {
                 }
                 Inst::Copy { .. }
                 | Inst::LoadGlobal { .. }
+                | Inst::GpuMinLen { .. }
                 | Inst::StoreGlobal { .. }
                 | Inst::DepthCheck => {}
                 Inst::FloatBinary { op, dst, lhs, rhs } => {

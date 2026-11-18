@@ -1,0 +1,482 @@
+// Decides where a program built with `--gpu` computes each piece of arithmetic on lists: on the
+// processor, or on a GPU, which pays for itself only when the time it saves on the elements
+// outweighs what reaching it costs. `stone build` records each kernel's cost per element on
+// either side in the image (bytes in and out, femtoseconds per element), and the first launch
+// starts the GPU, measures what this machine's GPU costs to reach (the latency of a launch and
+// the time per byte of moving lists to and from it), and works out for each kernel the shortest
+// list worth a launch. Compiled code compares each list's length with that minimum before it
+// calls `launch`, so a short list never pays for a call.
+//
+// `STONE_GPU` chooses: unset, the costs decide; `off`, the processor computes everything;
+// `always`, every kernel is launched whatever its length; `require`, as `always`, but a program
+// that cannot use a GPU stops with an error at the arithmetic.
+//
+// Lists can also stay on the device. Compiled code brackets a region (a run of statements that
+// only compute on lists, or a loop whose body only does) with `begin` and `end`, and gives each
+// launch in it a descriptor naming, for each list it takes, the region's slot of the variable
+// that holds it. A list a kernel reads is copied to the device the first time and read from
+// there after; a result a kernel writes stays there, and `end` copies back each one the program
+// reads after the region. Nothing on the processor touches those lists until then, which the
+// compiler makes sure of, so the copies left on the processor may be out of date. A launch in
+// a region that the GPU does not compute first copies every list kept on the device back, and
+// the rest of the region runs as if there were none.
+
+use os
+use gpu_sys
+use gpu_nv
+use gpu_sim
+
+// The settings of `STONE_GPU`.
+const mode_cost = 0
+const mode_off = 1
+const mode_always = 2
+const mode_require = 3
+
+// The fields of the plan block, 8 bytes each: whether the GPU was started (0 not yet, 1 ready,
+// 2 off or given up), the mode, what a launch gives once given up (0, or a refusal's negative
+// under `require`), and what the probe measured, in femtoseconds.
+const at_started = 0
+const at_mode = 8
+const at_refused = 16
+const at_latency = 24
+const at_up = 32
+const at_down = 40
+
+// How many regions are open, counting those past the last a frame is kept for, then the frames
+// of the regions: per region the first slot it uses, how many it uses, and whether it keeps
+// lists on the device.
+const at_depth = 48
+const at_frames = 512
+
+// The device memory a launch computes into before its result is whole, and its size.
+const at_scratch = 56
+const at_scratch_size = 64
+const frame_size = 24
+const max_frames = 16
+
+// The slots of lists kept on the device: per slot the device's copy, its capacity in bytes,
+// the processor's copy, its size in bytes, and its state (empty, clean, or newer on the device).
+const at_slots = 1024
+const slot_size = 40
+const max_slots = 64
+const slot_device = 0
+const slot_capacity = 8
+const slot_host = 16
+const slot_bytes = 24
+const slot_state = 32
+const empty = 0
+const clean = 1
+const dirty = 2
+
+// The bits of a list's byte in a launch's descriptor: its slot plus 1 (0 for none), and that the
+// launch is the last to read it.
+const slot_bits = 63
+const drop_bit = 64
+
+// A loop's number of turns when it cannot be known before it runs.
+const unknown_trips = 16
+
+// The bits a simulated GPU leaves in a list it keeps, so reading it before it is copied back
+// shows: a nan for floats, an unlikely int for ints.
+const poison = 0x7FF4DEADDEADDEAD
+
+// The kind of refusal of a GPU whose probe failed, after the kinds `gpu_nv` gives.
+const probe_failed = 8
+
+// A length no list reaches, which keeps a kernel on the processor.
+const never = 0x7FFFFFFFFFFFFFFF
+
+// The version of the image's layout this module reads, and the size of a kernel's shape in it.
+const image_version = 4
+const shape_size = 48
+
+// The most a launch may take to start and finish, and the least bandwidth, for a GPU that
+// passes its probe: 50 ms, and 100 MB/s as femtoseconds per byte.
+const most_latency = 50000000000000
+const most_byte_time = 10000000
+
+// Returns the mode `STONE_GPU` names with `setting`; anything else means the costs decide.
+pub fn mode_of(setting: str) -> int:
+    if setting == "off":
+        ret mode_off
+    if setting == "always":
+        ret mode_always
+    if setting == "require":
+        ret mode_require
+    ret mode_cost
+
+// Returns the shortest list worth a launch of a kernel that costs `cpu` femtoseconds per
+// element on the processor and `gpu` on the GPU, moving `bytes_in` bytes per element to the GPU
+// and `bytes_out` back, on a GPU whose launch takes `latency` femtoseconds and whose transfers
+// take `up` and `down` femtoseconds per byte. A kernel the GPU never computes faster gives
+// `never`.
+pub fn min_length(cpu: int, gpu: int, bytes_in: int, bytes_out: int, latency: int, up: int, down: int) -> int:
+    saved = cpu - gpu - bytes_in * up - bytes_out * down
+    if saved <= 0:
+        ret never
+    ret ((latency + saved - 1) / saved).max(1)
+
+// Returns whether a probe's measurements describe a GPU worth using: a launch that finishes,
+// within `most_latency`, and transfers of at least 100 MB/s.
+pub fn plausible(latency: int, up: int, down: int) -> bool:
+    if latency <= 0 or latency > most_latency:
+        ret false
+    ret up > 0 and down > 0 and up <= most_byte_time and down <= most_byte_time
+
+// Returns the field at offset `at` of the plan block.
+fn field(at: int) -> int:
+    ret gpu_sys.peek64(gpu_sys.plan() + at)
+
+// Sets the field at offset `at` of the plan block to `v`.
+fn keep(at: int, v: int):
+    gpu_sys.poke64(gpu_sys.plan() + at, v)
+
+// Returns where the shape of the kernel that computes record `record` starts in the image.
+fn shape_of(record: int) -> int:
+    image = gpu_sys.image()
+    shapes = image + ((32 + 4 * gpu_sys.peek32(image + 16) + 7) & ~7)
+    ret shapes + shape_size * gpu_sys.peek32(image + 32 + 4 * record)
+
+// Sets every record's shortest list worth a launch, as `mode` says: `never` when off, 1 when
+// every kernel is launched, and else what the costs and the probe give.
+fn fill(mode: int):
+    image = gpu_sys.image()
+    records = 0
+    if gpu_sys.peek64(image) == 0x555047454E4F5453 and gpu_sys.peek32(image + 8) == image_version:
+        records = gpu_sys.peek32(image + 16)
+    table = gpu_sys.min_lengths()
+    latency = field(at_latency)
+    up = field(at_up)
+    down = field(at_down)
+    for record in range(records):
+        shortest = never
+        if mode == mode_always or mode == mode_require:
+            shortest = 1
+        elif mode == mode_cost:
+            shape = shape_of(record)
+            bytes_in = gpu_sys.peek32(shape + 16)
+            bytes_out = gpu_sys.peek32(shape + 20)
+            cpu = gpu_sys.peek32(shape + 24)
+            gpu = gpu_sys.peek32(shape + 28)
+            shortest = min_length(cpu, gpu, bytes_in, bytes_out, latency, up, down)
+        gpu_sys.poke64(table + 8 * record, shortest)
+
+// Gives the GPU up for the rest of the run, with `refused` what every launch then gives.
+fn stop(refused: int):
+    keep(at_started, 2)
+    keep(at_refused, refused)
+    fill(mode_off)
+
+// Reads `STONE_GPU`, starts the GPU, measures it, and sets every kernel's shortest list.
+fn start():
+    mode = mode_of(os.env("STONE_GPU").unwrap_or(""))
+    keep(at_mode, mode)
+    if mode == mode_off:
+        stop(0)
+        ret
+    if gpu_sys.simulated():
+        // a simulated GPU is always there, and launching every kernel reaches every path
+        keep(at_started, 1)
+        fill(mode_always)
+    else:
+        start_device(mode)
+
+// Starts the GPU for `mode`, measures it, and sets every kernel's shortest list.
+fn start_device(mode: int):
+    require = 0
+    if mode == mode_require:
+        require = 1
+    state = gpu_nv.open(require)
+    if state < 0:
+        stop(gpu_nv.refused(state))
+        ret
+    match gpu_nv.probe(state):
+        case ok(measured):
+            latency, up, down = measured
+            if not plausible(latency, up, down):
+                stop(gpu_nv.give_up(state, probe_failed))
+                ret
+            keep(at_latency, latency)
+            keep(at_up, up)
+            keep(at_down, down)
+        case err(code):
+            stop(gpu_nv.give_up(state, code))
+            ret
+    keep(at_started, 1)
+    fill(mode)
+
+////////////////////////////////////////////////////////////////
+// lists kept on the device
+////////////////////////////////////////////////////////////////
+
+// Returns the address of `bytes` bytes of the device's memory, or -1. Both the simulated
+// device's memory and the memory `gpu_nv` keeps lists in so far are the processor's, mapped
+// into the GPU, so the processor copies lists to and from them itself.
+fn device_alloc(bytes: int) -> int:
+    if gpu_sys.simulated():
+        ret gpu_sim.alloc(bytes)
+    ret gpu_nv.alloc_device(bytes)
+
+// Copies `bytes` bytes of the processor's memory at `host` to the device's at `device`.
+fn upload(device: int, host: int, bytes: int):
+    gpu_sys.copy(device, host, bytes)
+
+// Copies `bytes` bytes of the device's memory at `device` to the processor's at `host`.
+fn download(host: int, device: int, bytes: int):
+    gpu_sys.copy(host, device, bytes)
+
+// Copies `bytes` bytes of the device's memory from `from` to `to`.
+fn move(to: int, from: int, bytes: int):
+    gpu_sys.copy(to, from, bytes)
+
+// Returns what a kernel pays per byte of a list kept on the device, in femtoseconds, beyond
+// what its shape says.
+fn device_byte() -> int:
+    if gpu_sys.simulated():
+        ret 0
+    ret gpu_nv.device_byte()
+
+// Runs the kernel of record `record` over `args`, in which each list whose bit is set in
+// `placed` is in the device's memory, into the elements at `into` (there too if bit 0 is set).
+// Gives 1 when it computed them and 0 when it did not.
+fn run_into(record: int, args: list[int], into: int, placed: int) -> int:
+    if gpu_sys.simulated():
+        ret gpu_sim.compute(record, args, into)
+    given = []
+    for v in args:
+        given.append(v)
+    given[0] = into
+    ran = gpu_nv.launch_placed(record, given, placed)
+    if gpu_sys.state() < 0:
+        // the driver gave the GPU up, so no later list is worth a call
+        stop(ran.min(0))
+    ret ran
+
+// Returns the address of slot `slot`.
+fn slot_at(slot: int) -> int:
+    ret gpu_sys.plan() + at_slots + slot_size * slot
+
+// Returns the address of the frame of the innermost open region, or -1 when it keeps none.
+fn frame_at() -> int:
+    depth = field(at_depth)
+    if depth == 0 or depth > max_frames:
+        ret -1
+    ret gpu_sys.plan() + at_frames + frame_size * (depth - 1)
+
+// Returns the frame of the innermost open region if it keeps lists on the device, else -1.
+fn active_frame() -> int:
+    f = frame_at()
+    if f >= 0 and gpu_sys.peek64(f + 16) == 1:
+        ret f
+    ret -1
+
+// Copies back, from the slots of frame `f`, each list newer on the device whose bit is set in
+// `live`, and empties every slot.
+fn settle(f: int, live: int):
+    base = gpu_sys.peek64(f)
+    for k in range(gpu_sys.peek64(f + 8)):
+        at = slot_at(base + k)
+        if gpu_sys.peek64(at + slot_state) == dirty and (live >> k) & 1 == 1:
+            download(gpu_sys.peek64(at + slot_host), gpu_sys.peek64(at + slot_device), gpu_sys.peek64(at + slot_bytes))
+        gpu_sys.poke64(at + slot_state, empty)
+
+// Gives the innermost region's lists back to the processor and computes the rest of it there.
+pub fn flush():
+    f = active_frame()
+    if f >= 0:
+        settle(f, -1)
+        gpu_sys.poke64(f + 16, 0)
+
+// Returns whether keeping the lists of a region on the device is worth it: a region whose
+// kernels are records `first` to `last` (not included), reading `inputs` lists from the
+// processor and giving it `outputs` back, each of `n` elements, run `trips` times (-1 when
+// that is not known).
+fn worth(first: int, last: int, inputs: int, outputs: int, n: int, trips: int) -> bool:
+    mode = field(at_mode)
+    if mode == mode_always or mode == mode_require or gpu_sys.simulated():
+        ret true
+    turns = trips
+    if turns < 0:
+        turns = unknown_trips
+    if turns == 0 or n <= 0:
+        ret false
+    cpu = 0.0
+    gpu = 0.0
+    for record in range(first, last):
+        shape = shape_of(record)
+        cpu += float(gpu_sys.peek32(shape + 24))
+        moved_bytes = gpu_sys.peek32(shape + 16) + gpu_sys.peek32(shape + 20)
+        gpu += float(gpu_sys.peek32(shape + 28).max(moved_bytes * device_byte()))
+    elements = float(n) * float(turns)
+    launches = float(turns) * float(last - first) * float(field(at_latency))
+    bytes = 8.0 * float(n)
+    moved = bytes * (float(inputs) * float(field(at_up)) + float(outputs) * float(field(at_down)))
+    ret launches + moved + elements * gpu < elements * cpu
+
+// Opens a region whose kernels are records `first` to `last` (not included) and whose lists
+// take `count` slots, as `worth` describes it, and gives 1 when it keeps lists on the device
+// and 0 when it does not. Every `begin` is followed by one `end`.
+pub fn begin(first: int, last: int, inputs: int, outputs: int, n: int, trips: int, count: int) -> int:
+    if field(at_started) == 0:
+        start()
+    depth = field(at_depth)
+    keep(at_depth, depth + 1)
+    if depth >= max_frames:
+        ret 0
+    base = 0
+    if depth > 0:
+        outer = gpu_sys.plan() + at_frames + frame_size * (depth - 1)
+        base = gpu_sys.peek64(outer) + gpu_sys.peek64(outer + 8)
+    f = gpu_sys.plan() + at_frames + frame_size * depth
+    keeps = field(at_started) == 1 and count > 0 and base + count <= max_slots
+    if keeps:
+        keeps = worth(first, last, inputs, outputs, n, trips)
+    gpu_sys.poke64(f, base)
+    if keeps:
+        gpu_sys.poke64(f + 8, count)
+        gpu_sys.poke64(f + 16, 1)
+        for k in range(count):
+            gpu_sys.poke64(slot_at(base + k) + slot_state, empty)
+        ret 1
+    gpu_sys.poke64(f + 8, 0)
+    gpu_sys.poke64(f + 16, 0)
+    ret 0
+
+// Closes the innermost region, copying back each list newer on the device whose slot's bit is
+// set in `live`, the lists the program reads after it.
+pub fn end(live: int):
+    f = frame_at()
+    keep(at_depth, field(at_depth) - 1)
+    if f >= 0 and gpu_sys.peek64(f + 16) == 1:
+        settle(f, live)
+
+// Makes sure the slot at `at` has room for `bytes` bytes on the device, emptying it if it has
+// to move. Gives false when the device has no room.
+fn room(at: int, bytes: int) -> bool:
+    if gpu_sys.peek64(at + slot_capacity) >= bytes:
+        ret true
+    device = device_alloc(bytes.max(2 * gpu_sys.peek64(at + slot_capacity)))
+    if device < 0:
+        ret false
+    gpu_sys.poke64(at + slot_device, device)
+    gpu_sys.poke64(at + slot_capacity, bytes.max(2 * gpu_sys.peek64(at + slot_capacity)))
+    gpu_sys.poke64(at + slot_state, empty)
+    ret true
+
+// Fills `bytes` bytes at `host` with `poison`.
+fn spoil(host: int, bytes: int):
+    i = 0
+    while i < bytes:
+        gpu_sys.poke64(host + i, poison)
+        i += 8
+
+// Returns the address of `bytes` bytes of the device's memory that a launch may compute into
+// before its result is known to be whole, or -1.
+fn scratch(bytes: int) -> int:
+    if field(at_scratch_size) < bytes:
+        size = bytes.max(2 * field(at_scratch_size))
+        at = device_alloc(size)
+        if at < 0:
+            ret -1
+        keep(at_scratch, at)
+        keep(at_scratch_size, size)
+    ret field(at_scratch)
+
+// Runs record `record` over `args` in the active frame `f`, as `residency` says: one byte per
+// list the kernel takes, the result's first. Gives 1 when the GPU computed the result, kept on
+// the device if its byte names a slot, and 0 when it did not.
+fn launch_kept(f: int, record: int, args: list[int], residency: int) -> int:
+    if args.len() < 2 or args[1] <= 0:
+        ret 0
+    bytes = 8 * args[1]
+    shape = shape_of(record)
+    lists = gpu_sys.peek64(shape + 8)
+    base = gpu_sys.peek64(f)
+    placed = []
+    dropped = []
+    read = []
+    mask = 0
+    result = -1
+    j = 0
+    for i in range(args.len()):
+        v = args[i]
+        if (lists >> i) & 1 == 1:
+            b = 0
+            if j < 8:
+                b = (residency >> (8 * j)) & 0xFF
+            j += 1
+            s = (b & slot_bits) - 1
+            if s >= 0:
+                at = slot_at(base + s)
+                if not room(at, bytes):
+                    ret 0
+                if i == 0:
+                    result = at
+                else:
+                    state = gpu_sys.peek64(at + slot_state)
+                    if state == empty or (state == clean and gpu_sys.peek64(at + slot_host) != v):
+                        upload(gpu_sys.peek64(at + slot_device), v, bytes)
+                        gpu_sys.poke64(at + slot_host, v)
+                        gpu_sys.poke64(at + slot_bytes, bytes)
+                        gpu_sys.poke64(at + slot_state, clean)
+                    if b & drop_bit != 0:
+                        dropped.append(at)
+                    read.append(at)
+                v = gpu_sys.peek64(at + slot_device)
+                mask = mask | (1 << i)
+        placed.append(v)
+    into = args[0]
+    staged = false
+    if result >= 0:
+        into = gpu_sys.peek64(result + slot_device)
+        // a kernel that may find a zero divisor must not leave a list it reads half written
+        if gpu_sys.peek32(shape + 4) & 1 == 1 and result in read:
+            into = scratch(bytes)
+            if into < 0:
+                ret 0
+            staged = true
+    if run_into(record, placed, into, mask) != 1:
+        ret 0
+    if result >= 0:
+        if staged:
+            move(gpu_sys.peek64(result + slot_device), into, bytes)
+        gpu_sys.poke64(result + slot_host, args[0])
+        gpu_sys.poke64(result + slot_bytes, bytes)
+        gpu_sys.poke64(result + slot_state, dirty)
+        if gpu_sys.simulated():
+            spoil(args[0], bytes)
+    for at in dropped:
+        gpu_sys.poke64(at + slot_state, empty)
+    ret 1
+
+////////////////////////////////////////////////////////////////
+// launching
+////////////////////////////////////////////////////////////////
+
+// Runs the kernel of record `record` over `args` (the result's elements, the length, then the
+// kernel's values, a list by its elements' address) where it is cheaper, starting the GPU on
+// the first call, keeping lists on the device as `residency` says in a region that keeps them.
+// Gives 1 when the GPU computed the result, 0 when the processor should, or
+// `-(kind + 16 * detail)` when `STONE_GPU=require` refuses to compute on the processor.
+pub fn launch(record: int, args: list[int], residency: int) -> int:
+    if field(at_started) == 0:
+        start()
+    if field(at_started) != 1:
+        ret field(at_refused)
+    f = active_frame()
+    if residency != 0 and f >= 0:
+        ran = launch_kept(f, record, args, residency)
+        if ran != 1:
+            // the processor computes this from lists it must have back
+            flush()
+        ret ran
+    // the first call comes before any minimum is known
+    if args.len() < 2 or args[1] < gpu_sys.peek64(gpu_sys.min_lengths() + 8 * record):
+        ret 0
+    if gpu_sys.simulated():
+        ret gpu_sim.launch(record, args)
+    ran = gpu_nv.launch(record, args)
+    if gpu_sys.state() < 0:
+        // the driver gave the GPU up, so no later list is worth a call
+        stop(ran.min(0))
+    ret ran

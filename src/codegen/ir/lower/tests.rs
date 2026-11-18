@@ -1936,6 +1936,10 @@ fn a_variable_read_twice_is_one_list_of_its_kernel() {
 /// Links, checks, and lowers the program `source` for Linux, with or without launches of its
 /// kernels on a GPU, returning the IR dump.
 fn dump_launching(source: &str, gpu_launch: bool) -> String {
+    let gpu_launch = match gpu_launch {
+        true => crate::codegen::gpu::Launch::Device,
+        false => crate::codegen::gpu::Launch::Never,
+    };
     let sources = crate::project::MapSources::default();
     let (_, module) = crate::driver::load(std::path::Path::new("main.stn"), source, &sources);
     let module = module.unwrap().module;
@@ -1955,14 +1959,21 @@ fn dump_launching(source: &str, gpu_launch: bool) -> String {
 fn a_program_for_a_gpu_tries_each_kernel_before_the_loop() {
     let source = "a = [1.0, 2.0]\nb = [3.0, 4.0]\nprint(a * 2.0 + b)\nprint([1, 2] * 3)\n";
     let without = dump_launching(source, false);
-    assert!(!without.contains("gpu_nv.launch"), "{without}");
+    assert!(!without.contains("gpu_plan.launch"), "{without}");
     let with = dump_launching(source, true);
-    // one launch per recorded kernel through the stone driver, by its number, each given the
+    // one launch per recorded kernel through the stone planner, by its number, each given the
     // result, length, and arguments in the order the kernel takes them
-    assert_eq!(with.matches("fn.gpu_nv.launch(0, ").count(), 1, "{with}");
-    assert_eq!(with.matches("fn.gpu_nv.launch(1, ").count(), 1, "{with}");
+    assert_eq!(with.matches("fn.gpu_plan.launch(0, ").count(), 1, "{with}");
+    assert_eq!(with.matches("fn.gpu_plan.launch(1, ").count(), 1, "{with}");
+    // a list shorter than the shortest worth a launch never calls in
+    assert_eq!(with.matches("= gpu_min_len 0\n").count(), 1, "{with}");
+    assert_eq!(with.matches("= gpu_min_len 1\n").count(), 1, "{with}");
     // a refusal under `STONE_GPU=require` fails at the arithmetic
     assert_eq!(with.matches("the GPU did not finish in time").count(), 2);
+    assert_eq!(
+        with.matches("the GPU failed its test at startup").count(),
+        2
+    );
     // the loop that computes the same on the processor is still there for a launch that fails
     assert_eq!(
         with.matches("list_set").count(),
@@ -1973,7 +1984,8 @@ fn a_program_for_a_gpu_tries_each_kernel_before_the_loop() {
 #[test]
 fn arithmetic_a_gpu_cannot_compute_is_never_launched() {
     let with = dump_launching("a = [7, 8]\nb = [2, 3]\nprint(a % b)\n", true);
-    assert!(!with.contains("gpu_nv.launch"), "{with}");
+    assert!(!with.contains("gpu_plan.launch"), "{with}");
+    assert!(!with.contains("gpu_min_len"), "{with}");
 }
 
 #[test]
@@ -2012,7 +2024,7 @@ test \"prints\":
         &checked.module,
         &checked.analysis,
         crate::codegen::Os::Linux,
-        false,
+        crate::codegen::gpu::Launch::Never,
         Some(&tests),
     )
     .unwrap();
@@ -2196,4 +2208,70 @@ fn invert_is_an_exclusive_or_with_every_bit() {
     for wanted in ["xor v0, -1", "and v1, 255", "xor v0, 1", "or v2, v3"] {
         assert!(ir.contains(wanted), "{wanted:?} in {ir}");
     }
+}
+
+#[test]
+fn a_chain_of_arithmetic_keeps_its_lists_on_the_gpu() {
+    let source = "fn f(x: list[float]) -> list[float]:\n    t = x * 2.0\n    u = t + 1.0\n    \
+                  w = u * x\n    ret w\nprint(f([1.0]))\n";
+    let with = dump_launching(source, true);
+    // one region of three kernels whose slots are x, t, u, w in the order first named
+    assert_eq!(
+        with.matches("call fn.gpu_plan.begin(0, 3, ").count(),
+        1,
+        "{with}"
+    );
+    // `t = x * 2.0` keeps t in slot 1 (its byte is 2) and reads x from slot 0 (byte 1)
+    assert!(
+        with.contains("fn.gpu_plan.launch(0, v") && with.contains(", 258)"),
+        "{with}"
+    );
+    // `u = t + 1.0` is the last to read t, so it drops it (64 + 2)
+    assert!(with.contains(&format!(", {})", 3 | (66 << 8))), "{with}");
+    // only w, slot 3, is read after the region
+    assert_eq!(with.matches("call fn.gpu_plan.end(8)").count(), 1, "{with}");
+    // inside a region every launch asks the runtime, which knows what the device holds
+    assert_eq!(with.matches("gpu_min_len").count(), 0, "{with}");
+    let without = dump_launching(source, false);
+    assert!(!without.contains("gpu_plan"), "{without}");
+}
+
+#[test]
+fn a_list_read_between_statements_ends_the_chain() {
+    let source = "fn f(x: list[float]) -> list[float]:\n    t = x * 2.0\n    print(t[0])\n    \
+                  u = t + 1.0\n    ret u\nprint(f([1.0]))\n";
+    let with = dump_launching(source, true);
+    assert!(!with.contains("gpu_plan.begin"), "{with}");
+    // so each launch is an ordinary one, tried only for lists long enough
+    assert_eq!(with.matches("gpu_min_len").count(), 2, "{with}");
+}
+
+#[test]
+fn a_loop_that_only_computes_on_lists_keeps_them_on_the_gpu_for_every_turn() {
+    let source = "fn decay(x: list[float], v: list[float], k: int) -> list[float]:\n    \
+                  for _ in range(k):\n        x = x * 0.5 + v\n    ret x\n\
+                  print(decay([1.0], [2.0], 3))\n";
+    let with = dump_launching(source, true);
+    // one region of one kernel, k turns, x in slot 0 and v in slot 1
+    assert_eq!(
+        with.matches("call fn.gpu_plan.begin(0, 1, 2, 1, ").count(),
+        1,
+        "{with}"
+    );
+    assert!(
+        with.contains(&format!(", {})", 1 | (1 << 8) | (2 << 16))),
+        "{with}"
+    );
+    assert_eq!(with.matches("call fn.gpu_plan.end(1)").count(), 1, "{with}");
+    // a loop whose body reads a list on the processor keeps nothing
+    let read = "fn decay(x: list[float], k: int) -> list[float]:\n    for _ in range(k):\n        \
+                x = x * 0.5\n        print(x[0])\n    ret x\nprint(decay([1.0], 3))\n";
+    assert!(!dump_launching(read, true).contains("gpu_plan.begin"));
+}
+
+#[test]
+fn top_level_code_that_calls_keeps_no_global_on_the_gpu() {
+    let source = "fn first() -> float:\n    ret xs[0]\nxs = [1.0]\nfor _ in range(3):\n    \
+                  s = first()\n    xs = xs * 2.0\nprint(xs)\n";
+    assert!(!dump_launching(source, true).contains("gpu_plan.begin"));
 }

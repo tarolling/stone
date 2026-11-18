@@ -87,7 +87,8 @@ pub fn load(
 }
 
 /// Loads a program as [`load`] does, linking the modules written in stone named in `required`
-/// too, as a build that launches kernels links the GPU's driver ([`crate::stdlib::gpu::NV_MODULE`]).
+/// too, as a build that launches kernels links the planner and the GPU's driver
+/// ([`crate::stdlib::gpu::PLAN_MODULE`]).
 ///
 /// For example, `load_with(entry, source, sources, &[])` is `load(entry, source, sources)`.
 pub fn load_with(
@@ -538,14 +539,22 @@ fn compile_with(
         Os::Windows => Some(image::Carry::Modules),
         Os::MacOs => None,
     };
-    generator.set_gpu_launch(!devices.is_empty() && carry.is_some());
+    // a Linux build can simulate its GPU for tests, which reach every path a GPU takes
+    let launch = if devices.is_empty() || carry.is_none() {
+        codegen::gpu::Launch::Never
+    } else if target.os == Os::Linux && std::env::var_os(codegen::gpu::SIMULATE).is_some() {
+        codegen::gpu::Launch::Simulated
+    } else {
+        codegen::gpu::Launch::Device
+    };
+    generator.set_gpu_launch(launch);
     if let Some(tests) = tests {
         generator.set_tests(tests);
     }
     generator.set_optimizer(options);
     let mut assembly = generator.assemble(&checked.module)?;
     if !devices.is_empty() {
-        let numbered = codegen::gpu::numbered(generator.device_kernels())?;
+        let numbered = codegen::gpu::numbered(generator.device_kernels(), target)?;
         let mut embedded = Vec::new();
         for &device in devices {
             let text = ptx::module(&numbered.kernels, device)?;
@@ -588,7 +597,13 @@ fn compile_with(
             }
         }
         if let Some(carry) = carry {
-            let image = image::build(&numbered.record_kernel, &numbered.shapes, &embedded, carry)?;
+            let image = image::build(
+                &numbered.record_kernel,
+                &numbered.shapes,
+                &numbered.programs,
+                &embedded,
+                carry,
+            )?;
             assembly.push_str(&image::assembly(&image));
         }
     }
@@ -630,6 +645,7 @@ fn embeddable(
     image::build(
         &numbered.record_kernel,
         &numbered.shapes,
+        &numbered.programs,
         std::slice::from_ref(code),
         image::Carry::Sass,
     )
@@ -971,6 +987,7 @@ mod tests {
             kernels: Vec::new(),
             record_kernel: Vec::new(),
             shapes: Vec::new(),
+            programs: Vec::new(),
         };
         assert_eq!(
             embeddable(&code, &numbered).unwrap_err(),

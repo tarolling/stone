@@ -1,0 +1,25 @@
+// a loop that ends early still gives its lists back
+
+x = [1.0, 2.0]
+y = [0.0, 0.0]
+n = 0
+while true:
+    x = x * 2.0 + 1.0
+    n += 1
+    if n == 5:
+        break
+    y = y + x
+print(x, y, n)
+
+fn halve(xs: list[float], limit: int) -> list[float]:
+    i = 0
+    while i < 10:
+        i += 1
+        if i > limit:
+            break
+        if i % 2 == 0:
+            cont
+        xs = xs / 2.0
+    ret xs
+
+print(halve([64.0, 32.0], 6))

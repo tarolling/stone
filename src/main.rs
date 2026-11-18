@@ -560,7 +560,7 @@ fn build(
         // a build that launches kernels on Linux runs them through the GPU's driver, in stone
         let required: &[&str] = match devices.is_empty() {
             true => &[],
-            false => &[stone::stdlib::gpu::NV_MODULE],
+            false => &[stone::stdlib::gpu::PLAN_MODULE],
         };
         let code = with_program_requiring(file, offline, required, |checked, sources| {
             let targets = if unique.is_empty() {

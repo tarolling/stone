@@ -1468,6 +1468,16 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
+            Inst::GpuMinLen { dst, record } => {
+                let dst = frame.reg(*dst)?;
+                let target = self.target(dst, None);
+                self.emit(&format!(
+                    "\tmov\t{target}, QWORD PTR [rip + {}]",
+                    crate::codegen::gpu::min_length_label(*record)
+                ));
+                self.store(dst, target);
+            }
+
             Inst::StoreGlobal { name, src } => {
                 let label = global_label(name);
                 match frame.value(*src)? {

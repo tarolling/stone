@@ -10216,10 +10216,25 @@ impl Inference {
                 }
                 ret
             }
-            "gpu_sys.open" | "gpu_sys.close" | "gpu_sys.ioctl" | "gpu_sys.mmap"
-            | "gpu_sys.munmap" | "gpu_sys.peek32" | "gpu_sys.peek64" | "gpu_sys.poke32"
-            | "gpu_sys.poke64" | "gpu_sys.copy" | "gpu_sys.fence" | "gpu_sys.state"
-            | "gpu_sys.set_state" | "gpu_sys.image" => {
+            "gpu_sys.open"
+            | "gpu_sys.close"
+            | "gpu_sys.ioctl"
+            | "gpu_sys.mmap"
+            | "gpu_sys.munmap"
+            | "gpu_sys.peek32"
+            | "gpu_sys.peek64"
+            | "gpu_sys.poke32"
+            | "gpu_sys.poke64"
+            | "gpu_sys.copy"
+            | "gpu_sys.fence"
+            | "gpu_sys.state"
+            | "gpu_sys.set_state"
+            | "gpu_sys.image"
+            | "gpu_sys.plan"
+            | "gpu_sys.min_lengths"
+            | "gpu_sys.simulated"
+            | "gpu_sys.peek_float"
+            | "gpu_sys.poke_float" => {
                 let ints = |n: usize| vec![Ty::Int; n];
                 let (params, ret) = match name {
                     "gpu_sys.open" => (vec![Ty::Str], Ty::Int),
@@ -10230,6 +10245,9 @@ impl Inference {
                     "gpu_sys.peek32" | "gpu_sys.peek64" => (ints(1), Ty::Int),
                     "gpu_sys.copy" => (ints(3), Ty::Unit),
                     "gpu_sys.fence" => (vec![], Ty::Unit),
+                    "gpu_sys.simulated" => (vec![], Ty::Bool),
+                    "gpu_sys.peek_float" => (ints(1), Ty::Float),
+                    "gpu_sys.poke_float" => (vec![Ty::Int, Ty::Float], Ty::Unit),
                     _ => (vec![], Ty::Int),
                 };
                 if args.len() == params.len() {

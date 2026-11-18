@@ -1,0 +1,27 @@
+// lists computed one statement after another stay on the device between the statements
+
+fn chain(x: list[float], y: list[float]) -> list[float]:
+    a = x * 2.0 + y
+    b = a * a
+    c = b - x
+    ret c
+
+xs = []
+ys = []
+for i in range(6):
+    xs.append(float(i))
+    ys.append(float(10 - i))
+print(chain(xs, ys))
+
+// at the top level, where the lists are globals
+a = xs * 3.0
+b = a + ys
+c = b * a
+print(c)
+print(a)
+
+// ints
+ns = [1, 2, 3, 4]
+ms = ns * 3 + ns
+ks = ms ^ ns
+print(ms, ks)

@@ -1,0 +1,18 @@
+// a list the processor reads between kernels keeps no copy on the device
+
+x = [1.0, 2.0, 3.0]
+v = [1.0, 1.0, 1.0]
+for i in range(3):
+    x = x * 2.0 + v
+    print(x[0])
+print(x)
+
+fn mixed(a: list[float]) -> list[float]:
+    b = a * 2.0
+    c = b + a
+    a.append(0.5)
+    d = c * 2.0
+    e = d - b
+    ret e + a[0:3]
+
+print(mixed([1.0, 2.0, 3.0]))

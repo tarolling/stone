@@ -195,7 +195,7 @@ impl AssemblyGenerator for X64Generator {
         &self.ctx.program.device_kernels
     }
 
-    fn set_gpu_launch(&mut self, launch: bool) {
+    fn set_gpu_launch(&mut self, launch: crate::codegen::gpu::Launch) {
         self.ctx.gpu_launch = launch;
     }
 
@@ -745,7 +745,8 @@ impl X64Generator {
         }
         let gpu = self.ctx.module_routines("stone.gpu_");
         if !gpu.is_empty() {
-            gpu::gpu_sys_runtime(self, &gpu);
+            let records = self.ctx.program.device_kernels.len();
+            gpu::gpu_sys_runtime(self, &gpu, records);
         }
         let random: Vec<&str> = [
             "stone.random_seed",

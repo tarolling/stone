@@ -20,7 +20,10 @@ use crate::codegen::AssemblyGenerator;
 /// Emits the `gpu_sys` routines among `labels`, each taking its arguments as a System V call
 /// does and giving its result in `rax`. The system calls give a negative error number on failure,
 /// as Linux returns it.
-pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str]) {
+///
+/// The table of each of the program's `records` shortest lists worth a launch comes with
+/// `stone.gpu_min_lengths_address`, and the planner's block with `stone.gpu_plan_address`.
+pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], records: usize) {
     let uses = |label: &str| labels.contains(&label);
     if uses("stone.gpu_get_slot") || uses("stone.gpu_set_slot") {
         r#gen.emit("\t.bss");
@@ -28,6 +31,18 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str]) {
         r#gen.emit("stone.gpu_slot:");
         r#gen.emit("\t.zero\t8");
         r#gen.emit("\t.text");
+    }
+    if uses("stone.gpu_plan_address") {
+        r#gen.emit("\t.bss");
+        r#gen.emit("\t.p2align\t3");
+        r#gen.emit("stone.gpu_plan:");
+        r#gen.emit("\t.zero\t4096");
+        r#gen.emit("\t.text");
+    }
+    if uses("stone.gpu_min_lengths_address") {
+        for line in crate::codegen::gpu::min_length_table(records).lines() {
+            r#gen.emit(line);
+        }
     }
     for &label in labels {
         let body: &[&str] = match label {
@@ -45,14 +60,17 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str]) {
             "stone.gpu_mmap" => &["\tmov\tr10, rcx", "\tmov\teax, 9", "\tsyscall"],
             "stone.gpu_munmap" => &["\tmov\teax, 11", "\tsyscall"],
             "stone.gpu_peek32" => &["\tmov\teax, DWORD PTR [rdi]"],
-            "stone.gpu_peek64" => &["\tmov\trax, QWORD PTR [rdi]"],
+            // a float travels as its bits, in the same registers as an int
+            "stone.gpu_peek64" | "stone.gpu_peek_float" => &["\tmov\trax, QWORD PTR [rdi]"],
             "stone.gpu_poke32" => &["\tmov\tDWORD PTR [rdi], esi"],
-            "stone.gpu_poke64" => &["\tmov\tQWORD PTR [rdi], rsi"],
+            "stone.gpu_poke64" | "stone.gpu_poke_float" => &["\tmov\tQWORD PTR [rdi], rsi"],
             "stone.gpu_copy" => &["\tmov\trcx, rdx", "\trep\tmovsb"],
             "stone.gpu_fence" => &["\tmfence"],
             "stone.gpu_get_slot" => &["\tmov\trax, QWORD PTR [rip + stone.gpu_slot]"],
             "stone.gpu_set_slot" => &["\tmov\tQWORD PTR [rip + stone.gpu_slot], rdi"],
             "stone.gpu_image_address" => &["\tlea\trax, [rip + stone.gpu_image]"],
+            "stone.gpu_plan_address" => &["\tlea\trax, [rip + stone.gpu_plan]"],
+            "stone.gpu_min_lengths_address" => &["\tlea\trax, [rip + stone.gpu_min_len]"],
             _ => continue,
         };
         r#gen.emit(&format!("{label}:"));
@@ -94,8 +112,8 @@ mod tests {
             .map(|(_, label)| *label)
             .filter(|label| label.starts_with("stone.gpu_"))
             .collect::<Vec<_>>();
-        assert_eq!(labels.len(), 14);
-        gpu_sys_runtime(&mut generator, &labels);
+        assert_eq!(labels.len(), 18);
+        gpu_sys_runtime(&mut generator, &labels, 2);
         let text = &generator.output;
         for piece in [
             "stone.gpu_open:\n\tmov\trsi, rdi\n\tmov\trdi, -100\n\tmov\tedx, 524290\n",
@@ -119,7 +137,7 @@ mod tests {
     #[test]
     fn only_the_routines_called_are_emitted() {
         let mut generator = X64Generator::default();
-        gpu_sys_runtime(&mut generator, &["stone.gpu_fence"]);
+        gpu_sys_runtime(&mut generator, &["stone.gpu_fence"], 0);
         let text = &generator.output;
         assert!(text.contains("stone.gpu_fence:"), "{text}");
         assert!(!text.contains("stone.gpu_open:"), "{text}");

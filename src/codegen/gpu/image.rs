@@ -10,20 +10,24 @@
 //! ```text
 //! header   (32 bytes)  "STONEGPU", version u32, devices u32, records u32, kernels u32, size u64
 //! records  (4 each)    the kernel that computes each record, padded to 8 bytes
-//! shapes   (16 each)   per kernel: params u32, flags u32, lists u64
+//! shapes   (48 each)   per kernel: params u32, flags u32, lists u64, then its cost per
+//!                      element: bytes in u32, bytes out u32, processor time u32, GPU time u32,
+//!                      then the offset and size of its program for a simulated GPU (u64 each)
 //! devices  (48 each)   sm u32, specific u32, offset of the device's kernels u64 (0 for none),
 //!                      cubin offset u64, cubin size u64, PTX offset u64, PTX size u64
 //! kernels  (48 each)   per device, in kernel order: code offset u64, code size u64, registers,
 //!                      param_offset, param_size, shared (all u32), then the offset and size
 //!                      of the kernel's constant bank 2 (u64 each, a size of 0 for none)
-//! code                 the machine code and constant bank 2 of each kernel, each cubin, and
-//!                      each PTX text
+//! code                 each kernel's program, then the machine code and constant bank 2 of
+//!                      each kernel, each cubin, and each PTX text
 //! ```
 //!
 //! A record is a piece of arithmetic on lists, as `Program::device_kernels` numbers them, which
 //! is the number `stone.gpu_launch` is called with. A shape's flags bit 0 says the kernel takes
 //! the address of a flag it sets when a divisor is zero as its last parameter, and bit 1 that it
 //! computes floats; bit `i` of its lists says parameter `i` is the address of a list's elements.
+//! Its times are in femtoseconds ([`Cost`](super::cost::Cost)), which the runtime weighs against
+//! what it measures of the GPU to decide where to compute.
 //!
 //! What a device entry carries depends on the system ([`Carry`]): a Linux program carries each
 //! kernel's machine code (SASS) and the facts a launch needs to place it, and a Windows program,
@@ -31,6 +35,7 @@
 //! PTX, ended by a 0 byte, which the driver compiles when no cubin suits the GPU. A size of 0
 //! means the entry has no such part.
 
+use super::cost::Cost;
 use super::cubin::CubinKernel;
 use super::kernel::Shape;
 use crate::codegen::context::escape_bytes;
@@ -39,14 +44,14 @@ use crate::codegen::device::Device;
 /// The first bytes of an image.
 pub const MAGIC: &[u8; 8] = b"STONEGPU";
 /// The version of the layout above.
-pub const VERSION: u32 = 3;
+pub const VERSION: u32 = 4;
 /// The label of the image in the executable.
 pub const LABEL: &str = "stone.gpu_image";
 
 /// The size of the header.
 pub const HEADER_SIZE: usize = 32;
 /// The size of a shape.
-pub const SHAPE_SIZE: usize = 16;
+pub const SHAPE_SIZE: usize = 48;
 /// The size of a device entry.
 pub const DEVICE_SIZE: usize = 48;
 /// The size of a kernel entry.
@@ -114,6 +119,8 @@ pub struct DeviceImage {
 pub struct Image {
     pub record_kernel: Vec<u32>,
     pub shapes: Vec<Shape>,
+    /// Each kernel's program for a simulated GPU ([`program`](super::kernel::program)), or none.
+    pub programs: Vec<Vec<u8>>,
     pub devices: Vec<DeviceImage>,
 }
 
@@ -125,7 +132,8 @@ pub enum Module {
 }
 
 /// Returns the image of `devices`' code for a program whose records are computed by the
-/// kernels `record_kernel` names, the kernels having `shapes`, carrying what `carry` says.
+/// kernels `record_kernel` names, the kernels having `shapes` and `programs` (one each, or none
+/// at all), carrying what `carry` says.
 /// Devices are sorted by compute capability, and each cubin must have every kernel, named
 /// `stone_k0`, `stone_k1`, ... as [`kernels`](super::kernels) names them, and with as many
 /// parameters as the shape says.
@@ -136,11 +144,15 @@ pub enum Module {
 pub fn build(
     record_kernel: &[usize],
     shapes: &[Shape],
+    programs: &[Vec<u8>],
     devices: &[DeviceCode],
     carry: Carry,
 ) -> Result<Vec<u8>, String> {
     if record_kernel.iter().any(|&kernel| kernel >= shapes.len()) {
         return Err("a record names a kernel that does not exist".into());
+    }
+    if !programs.is_empty() && programs.len() != shapes.len() {
+        return Err("there is not one program per kernel".into());
     }
     struct Ordered<'a> {
         sm: u32,
@@ -216,8 +228,24 @@ pub fn build(
             if shape.fail_flag { FLAG_FAIL } else { 0 } | if shape.float { FLAG_FLOAT } else { 0 };
         put_u32(&mut bytes, at + 4, flags);
         put_u64(&mut bytes, at + 8, shape.lists);
+        put_u32(&mut bytes, at + 16, shape.cost.in_bytes);
+        put_u32(&mut bytes, at + 20, shape.cost.out_bytes);
+        put_u32(&mut bytes, at + 24, shape.cost.cpu_fs);
+        put_u32(&mut bytes, at + 28, shape.cost.gpu_fs);
     }
     let mut code = Vec::new();
+    for (index, program) in programs.iter().enumerate() {
+        let at = shapes_at + SHAPE_SIZE * index;
+        put_u64(&mut bytes, at + 32, (code_start + code.len()) as u64);
+        put_u64(&mut bytes, at + 40, program.len() as u64);
+        code.extend_from_slice(program);
+        code.resize(align(code.len(), 8), 0);
+    }
+    // machine code starts on a boundary of its own
+    code.resize(
+        align(code_start + code.len(), CODE_ALIGNMENT) - code_start,
+        0,
+    );
     let mut table_at = tables;
     for (index, device) in ordered.iter().enumerate() {
         let device_at = devices_at + DEVICE_SIZE * index;
@@ -327,14 +355,25 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
     }
     let shapes_at = align(HEADER_SIZE + 4 * records, 8);
     let mut shapes = Vec::new();
+    let mut programs = Vec::new();
     for index in 0..kernels {
         let at = shapes_at + SHAPE_SIZE * index;
+        let program = range(at + 32)?;
+        if !program.is_empty() {
+            programs.push(program.to_vec());
+        }
         let flags = word(at + 4)?;
         shapes.push(Shape {
             params: word(at)?,
             fail_flag: flags & FLAG_FAIL != 0,
             float: flags & FLAG_FLOAT != 0,
             lists: long(at + 8)?,
+            cost: Cost {
+                in_bytes: word(at + 16)?,
+                out_bytes: word(at + 20)?,
+                cpu_fs: word(at + 24)?,
+                gpu_fs: word(at + 28)?,
+            },
         });
     }
     let devices_at = shapes_at + SHAPE_SIZE * kernels;
@@ -368,9 +407,13 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
             ptx: ptx.to_vec(),
         });
     }
+    if programs.len() != kernels {
+        programs.clear();
+    }
     Ok(Image {
         record_kernel,
         shapes,
+        programs,
         devices: images,
     })
 }
@@ -462,12 +505,24 @@ mod tests {
                 fail_flag: false,
                 params: 4,
                 lists: 0b1101,
+                cost: Cost {
+                    in_bytes: 16,
+                    out_bytes: 8,
+                    cpu_fs: 1_680_000,
+                    gpu_fs: 60_000,
+                },
             },
             Shape {
                 float: true,
                 fail_flag: true,
                 params: 5,
                 lists: 0b1101,
+                cost: Cost {
+                    in_bytes: 16,
+                    out_bytes: 8,
+                    cpu_fs: 1_000_000,
+                    gpu_fs: 80_000,
+                },
             },
         ]
     }
@@ -499,7 +554,7 @@ mod tests {
 
     #[test]
     fn an_image_gives_back_each_kernels_code_and_launch_details() {
-        let bytes = build(&[1, 0, 0], &shapes(), &[code("sm_75")], Carry::Sass).unwrap();
+        let bytes = build(&[1, 0, 0], &shapes(), &[], &[code("sm_75")], Carry::Sass).unwrap();
         assert_eq!(bytes.len() % 8, 0);
         let image = parse(&bytes).unwrap();
         assert_eq!(image.record_kernel, [1, 0, 0]);
@@ -522,12 +577,30 @@ mod tests {
     }
 
     #[test]
+    fn an_image_gives_back_each_kernels_program_for_a_simulated_gpu() {
+        let programs = vec![vec![1, 2, 1, 3, 16], vec![1, 2, 20]];
+        let bytes = build(&[0, 1], &shapes(), &programs, &[], Carry::Sass).unwrap();
+        let image = parse(&bytes).unwrap();
+        assert_eq!(image.programs, programs);
+        assert_eq!(image.shapes, shapes());
+        // the machine code that follows still starts on a 128-byte boundary
+        let bytes = build(&[0, 1], &shapes(), &programs, &[code("sm_75")], Carry::Sass).unwrap();
+        let image = parse(&bytes).unwrap();
+        assert_eq!(image.programs, programs);
+        let table = first_table(&bytes, 2);
+        let offset = u64::from_le_bytes(bytes[table..table + 8].try_into().unwrap());
+        assert_eq!(offset % 128, 0);
+        let error = build(&[0], &shapes(), &programs[..1], &[], Carry::Sass).unwrap_err();
+        assert!(error.contains("one program per kernel"), "{error}");
+    }
+
+    #[test]
     fn an_image_gives_back_each_kernels_literal_pool() {
         let mut with_literals = code("sm_75");
         let kernels = &mut with_literals.cubin.as_mut().unwrap().kernels;
         let k1 = kernels.iter_mut().find(|k| k.name == "stone_k1").unwrap();
         k1.literals = vec![1, 0, 0, 0, 0, 0, 0, 0];
-        let bytes = build(&[0, 1], &shapes(), &[with_literals], Carry::Sass).unwrap();
+        let bytes = build(&[0, 1], &shapes(), &[], &[with_literals], Carry::Sass).unwrap();
         let device = &parse(&bytes).unwrap().devices[0];
         assert!(device.kernels[0].literals.is_empty());
         assert_eq!(device.kernels[1].literals, [1, 0, 0, 0, 0, 0, 0, 0]);
@@ -535,7 +608,7 @@ mod tests {
 
     #[test]
     fn a_program_whose_driver_loads_modules_carries_the_cubin_and_the_ptx() {
-        let bytes = build(&[1, 0], &shapes(), &[code("sm_75")], Carry::Modules).unwrap();
+        let bytes = build(&[1, 0], &shapes(), &[], &[code("sm_75")], Carry::Modules).unwrap();
         let image = parse(&bytes).unwrap();
         assert_eq!(image.shapes, shapes());
         let device = &image.devices[0];
@@ -561,6 +634,7 @@ mod tests {
         let bytes = build(
             &[0],
             &shapes(),
+            &[],
             &[ptx_only("sm_86"), code("sm_75")],
             Carry::Modules,
         )
@@ -571,7 +645,7 @@ mod tests {
         assert!(image.devices[1].cubin.is_empty());
         assert_eq!(image.devices[1].ptx, b".version 6.3\n.target sm_86\n");
         // a program that places machine code itself needs every cubin
-        let error = build(&[0], &shapes(), &[ptx_only("sm_86")], Carry::Sass).unwrap_err();
+        let error = build(&[0], &shapes(), &[], &[ptx_only("sm_86")], Carry::Sass).unwrap_err();
         assert_eq!(error, "there is no cubin for sm_86");
     }
 
@@ -580,6 +654,7 @@ mod tests {
         let bytes = build(
             &[0],
             &shapes(),
+            &[],
             &[code("sm_75"), code("sm_90")],
             Carry::Sass,
         )
@@ -600,6 +675,7 @@ mod tests {
         let bytes = build(
             &[],
             &shapes(),
+            &[],
             &[code("sm_90"), code("sm_75"), code("sm_90a")],
             Carry::Sass,
         )
@@ -613,26 +689,33 @@ mod tests {
     fn a_kernel_the_cubin_lacks_or_with_other_parameters_is_an_error() {
         let mut shapes = shapes();
         shapes.push(shapes[0]);
-        let error = build(&[0], &shapes, &[code("sm_75")], Carry::Sass).unwrap_err();
+        let error = build(&[0], &shapes, &[], &[code("sm_75")], Carry::Sass).unwrap_err();
         assert_eq!(error, "the cubin for sm_75 has no kernel 'stone_k2'");
-        let error = build(&[0], &shapes, &[code("sm_75")], Carry::Modules).unwrap_err();
+        let error = build(&[0], &shapes, &[], &[code("sm_75")], Carry::Modules).unwrap_err();
         assert_eq!(error, "the cubin for sm_75 has no kernel 'stone_k2'");
         let mut shapes = self::shapes();
         shapes[0].params = 3;
-        let error = build(&[0], &shapes, &[code("sm_75")], Carry::Sass).unwrap_err();
+        let error = build(&[0], &shapes, &[], &[code("sm_75")], Carry::Sass).unwrap_err();
         assert!(
             error.starts_with("kernel 'stone_k0' for sm_75 takes 32 bytes"),
             "{error}"
         );
-        let error = build(&[2], &self::shapes(), &[code("sm_75")], Carry::Sass).unwrap_err();
+        let error = build(&[2], &self::shapes(), &[], &[code("sm_75")], Carry::Sass).unwrap_err();
         assert!(error.contains("a kernel that does not exist"), "{error}");
-        let error = build(&[0], &self::shapes(), &[code("gfx1100")], Carry::Sass).unwrap_err();
+        let error = build(&[0], &self::shapes(), &[], &[code("gfx1100")], Carry::Sass).unwrap_err();
         assert!(error.contains("no image format"), "{error}");
     }
 
     #[test]
+    fn the_linux_driver_reads_this_layout() {
+        let source = crate::stdlib::gpu::NV_SOURCE;
+        assert!(source.contains(&format!("const image_version = {VERSION}\n")));
+        assert!(source.contains(&format!("const shape_size = {SHAPE_SIZE}\n")));
+    }
+
+    #[test]
     fn a_damaged_image_is_an_error() {
-        let bytes = build(&[0, 1], &shapes(), &[code("sm_75")], Carry::Sass).unwrap();
+        let bytes = build(&[0, 1], &shapes(), &[], &[code("sm_75")], Carry::Sass).unwrap();
         assert!(parse(b"").unwrap_err().starts_with("not a GPU image"));
         assert!(parse(&[0; 64]).unwrap_err().starts_with("not a GPU image"));
         let mut cut = bytes.clone();
@@ -731,7 +814,7 @@ mod tests {
 
     #[test]
     fn the_assembly_places_the_image_in_rodata_unchanged() {
-        let bytes = build(&[0, 1], &shapes(), &[code("sm_75")], Carry::Modules).unwrap();
+        let bytes = build(&[0, 1], &shapes(), &[], &[code("sm_75")], Carry::Modules).unwrap();
         let text = assembly(&bytes);
         assert!(text.starts_with("\t.section .rodata\n\t.balign\t128\nstone.gpu_image:\n"));
         let object = asm::assemble(

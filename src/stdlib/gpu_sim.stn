@@ -1,0 +1,173 @@
+// A GPU simulated on the processor, for tests. A Linux program built with `STONE_GPU_SIMULATE`
+// set computes each kernel here, from the program `stone build` wrote of it into the image, as
+// a GPU would: into memory of its own, which goes into the result only when no divisor was
+// zero. Everything around a launch (the planner's decisions, the lists that stay on the device,
+// the copies back) then runs as it does with a GPU, so tests reach every path a GPU takes on a
+// machine without one.
+
+use gpu_sys
+
+// The operations of a kernel's program, as `gpu::kernel::op` numbers them.
+const element = 1
+const number = 2
+const constant = 3
+const add = 16
+const sub = 17
+const mul = 18
+const div = 19
+const neg = 20
+const bit_and = 21
+const bit_or = 22
+const bit_xor = 23
+
+// The size of a kernel's shape in the image, and the flag of one that computes floats.
+const shape_size = 48
+const flag_float = 2
+
+// Rounds `v` up to a multiple of `to`, a power of two.
+fn align(v: int, to: int) -> int:
+    ret (v + to - 1) & ~(to - 1)
+
+// Returns where the shape of the kernel that computes record `record` starts in the image.
+fn shape_of(record: int) -> int:
+    image = gpu_sys.image()
+    shapes = image + align(32 + 4 * gpu_sys.peek32(image + 16), 8)
+    ret shapes + shape_size * gpu_sys.peek32(image + 32 + 4 * record)
+
+// Reads the program of `size` bytes at `at` into its operations and, for each, the address of
+// the list an `element` reads or the bits of the number a `number` or `constant` pushes, from
+// the launch's `args`.
+fn decode(at: int, size: int, args: list[int]) -> tuple[list[int], list[int]]:
+    ops = []
+    values = []
+    i = 0
+    while i < size:
+        o = gpu_sys.peek32(at + i) & 0xFF
+        ops.append(o)
+        if o == element or o == number:
+            values.append(args[gpu_sys.peek32(at + i + 1) & 0xFF])
+            i += 2
+        elif o == constant:
+            values.append(gpu_sys.peek64(at + i + 1))
+            i += 9
+        else:
+            values.append(0)
+            i += 1
+    ret (ops, values)
+
+// Computes `n` float elements of the program `ops` over `values` into `out`, using the 8 bytes
+// at `scratch` to read a number's bits as a float. Gives false when a divisor was zero.
+fn run_floats(ops: list[int], values: list[int], n: int, out: int, scratch: int) -> bool:
+    numbers = []
+    stack = []
+    for j in range(ops.len()):
+        gpu_sys.poke64(scratch, values[j])
+        numbers.append(gpu_sys.peek_float(scratch))
+        stack.append(0.0)
+    for i in range(n):
+        top = 0
+        for j in range(ops.len()):
+            o = ops[j]
+            if o == element:
+                stack[top] = gpu_sys.peek_float(values[j] + 8 * i)
+                top += 1
+            elif o == number or o == constant:
+                stack[top] = numbers[j]
+                top += 1
+            elif o == neg:
+                stack[top - 1] = -stack[top - 1]
+            else:
+                b = stack[top - 1]
+                a = stack[top - 2]
+                top -= 1
+                if o == add:
+                    stack[top - 1] = a + b
+                elif o == sub:
+                    stack[top - 1] = a - b
+                elif o == mul:
+                    stack[top - 1] = a * b
+                else:
+                    if b == 0.0:
+                        ret false
+                    stack[top - 1] = a / b
+        gpu_sys.poke_float(out + 8 * i, stack[0])
+    ret true
+
+// Computes `n` int elements of the program `ops` over `values` into `out`, wrapping as the
+// processor does.
+fn run_ints(ops: list[int], values: list[int], n: int, out: int):
+    stack = []
+    for _ in ops:
+        stack.append(0)
+    for i in range(n):
+        top = 0
+        for j in range(ops.len()):
+            o = ops[j]
+            if o == element:
+                stack[top] = gpu_sys.peek64(values[j] + 8 * i)
+                top += 1
+            elif o == number or o == constant:
+                stack[top] = values[j]
+                top += 1
+            elif o == neg:
+                stack[top - 1] = -stack[top - 1]
+            else:
+                b = stack[top - 1]
+                a = stack[top - 2]
+                top -= 1
+                if o == add:
+                    stack[top - 1] = a + b
+                elif o == sub:
+                    stack[top - 1] = a - b
+                elif o == mul:
+                    stack[top - 1] = a * b
+                elif o == bit_and:
+                    stack[top - 1] = a & b
+                elif o == bit_or:
+                    stack[top - 1] = a | b
+                else:
+                    stack[top - 1] = a ^ b
+        gpu_sys.poke64(out + 8 * i, stack[0])
+
+// Computes the kernel of record `record` over `args` (the result's elements, the length, then
+// the kernel's values, a list by its elements' address) as a GPU would, into the elements at
+// `into`. Gives 1 when it computed them and 0 when a divisor was zero, so the processor
+// computes again and reports it.
+pub fn compute(record: int, args: list[int], into: int) -> int:
+    n = args[1]
+    shape = shape_of(record)
+    size = gpu_sys.peek64(shape + 40)
+    if n <= 0 or size == 0:
+        ret 0
+    ops, values = decode(gpu_sys.image() + gpu_sys.peek64(shape + 32), size, args)
+    // the device's own memory, with 8 bytes more of scratch
+    bytes = align(8 * n + 8, 0x1000)
+    memory = gpu_sys.mmap(0, bytes, 3, 0x22, -1, 0)
+    if memory < 0:
+        ret 0
+    computed = true
+    if gpu_sys.peek32(shape + 4) & flag_float != 0:
+        computed = run_floats(ops, values, n, memory, memory + 8 * n)
+    else:
+        run_ints(ops, values, n, memory)
+    if computed:
+        gpu_sys.copy(into, memory, 8 * n)
+    gpu_sys.munmap(memory, bytes)
+    if computed:
+        ret 1
+    ret 0
+
+// Returns the address of `bytes` bytes of the simulated device's memory, or -1, which the run
+// never frees, as a GPU's driver keeps what a program allocates until it ends.
+pub fn alloc(bytes: int) -> int:
+    at = gpu_sys.mmap(0, align(bytes, 0x1000), 3, 0x22, -1, 0)
+    if at < 0:
+        ret -1
+    ret at
+
+// Runs the kernel of record `record` over `args` as `compute` does, writing the result's
+// elements, which `args[0]` holds the address of.
+pub fn launch(record: int, args: list[int]) -> int:
+    if args.len() < 2:
+        ret 0
+    ret compute(record, args, args[0])

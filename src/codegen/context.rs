@@ -123,7 +123,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 58] = [
+pub const MODULE_ROUTINES: [(&str, &str); 62] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -187,6 +187,10 @@ pub const MODULE_ROUTINES: [(&str, &str); 58] = [
     ("gpu_sys.state", "stone.gpu_get_slot"),
     ("gpu_sys.set_state", "stone.gpu_set_slot"),
     ("gpu_sys.image", "stone.gpu_image_address"),
+    ("gpu_sys.plan", "stone.gpu_plan_address"),
+    ("gpu_sys.peek_float", "stone.gpu_peek_float"),
+    ("gpu_sys.poke_float", "stone.gpu_poke_float"),
+    ("gpu_sys.min_lengths", "stone.gpu_min_lengths_address"),
 ];
 
 /// The routines of the `fs` module that can return an error, which needs the routines that
@@ -612,7 +616,7 @@ pub struct Context {
     pub counts_references: bool,
     /// Whether arithmetic on lists that a GPU could compute first tries one, which a build with
     /// `--gpu` for a system that can reach the GPU asks for.
-    pub gpu_launch: bool,
+    pub gpu_launch: crate::codegen::gpu::Launch,
     /// The linked names of the test functions a build for `stone test` runs, one per run, or
     /// `None` for an ordinary build.
     pub tests: Option<Vec<String>>,

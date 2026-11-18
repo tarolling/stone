@@ -327,10 +327,11 @@ match net.listen(\"127.0.0.1\", 0):
     let module = module.unwrap().module;
     // built as `--gpu` builds, so the runtime launches the arithmetic on lists on a GPU
     let mut generator = crate::codegen::Target::X64_WINDOWS.generator();
-    generator.set_gpu_launch(true);
+    generator.set_gpu_launch(crate::codegen::gpu::Launch::Device);
     let mut assembly = generator.assemble(&module).unwrap();
     // the image `stone build` appends, empty since only what the runtime calls matters here
     let image = crate::codegen::gpu::image::build(
+        &[],
         &[],
         &[],
         &[],

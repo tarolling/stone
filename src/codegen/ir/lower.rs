@@ -29,6 +29,7 @@
 //! assignment happens after everything it evaluates. For example, `s = s + "x"` in a function
 //! lowers to `v2 = call stone.str_concat(v0, v1)`, then `release_str v0`, then `v0 = copy v2`.
 
+mod resident;
 #[cfg(test)]
 mod tests;
 
@@ -52,6 +53,7 @@ use crate::checker::{
 };
 use crate::codegen::Os;
 use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
+use crate::codegen::gpu::Launch;
 use crate::codegen::gpu::kernel::{Argument, arguments};
 use crate::constant::ConstValue;
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after, locals};
@@ -91,10 +93,10 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
 /// only the branch taken, so a Windows program never reaches the X11 and Wayland code, and a
 /// Linux one never the Win32 windows or Windows' resolver.
 pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, String> {
-    lower_with(module, analysis, os, false, None)
+    lower_with(module, analysis, os, Launch::Never, None)
 }
 
-/// Lowers `module` as [`lower_for`] does and, if `gpu_launch`, has each piece of arithmetic on
+/// Lowers `module` as [`lower_for`] does and, if `gpu_launch` launches, has each piece of arithmetic on
 /// lists that a GPU could compute ([`Program::device_kernels`]) first call `stone.gpu_launch`,
 /// which gives 1 if the GPU computed the result and 0 if the processor must, as it does with
 /// the loop that follows.
@@ -109,7 +111,7 @@ pub fn lower_with(
     module: &Mod,
     analysis: &Analysis,
     os: Os,
-    gpu_launch: bool,
+    gpu_launch: Launch,
     tests: Option<&[String]>,
 ) -> Result<Program, String> {
     let Mod::Module { body } = module;
@@ -687,8 +689,9 @@ const TABLE_METHODS: usize = 2;
 
 /// What lowering each function shares.
 struct Context<'a> {
-    /// Whether a piece of arithmetic on lists that a GPU could compute first tries one.
-    gpu_launch: bool,
+    /// Whether a piece of arithmetic on lists that a GPU could compute first tries one, and
+    /// whether that GPU is simulated, which `gpu_sys.simulated()` tells.
+    gpu_launch: Launch,
     /// The system the program runs on, which `gui_sys.on_windows()` tells.
     os: Os,
     types: &'a HashMap<Span, Type>,
@@ -888,6 +891,8 @@ struct Lowerer<'a> {
     moved_globals: HashSet<String>,
     /// The variables still read after each statement of the body being lowered.
     live_after: LiveAfter,
+    /// The region whose lists stay on a GPU that is being lowered, if any.
+    region: Option<resident::Region>,
     /// The variables the expression statement being lowered uses for the last time, which an
     /// `append` it makes may move into the list.
     statement_last_uses: Vec<String>,
@@ -949,6 +954,7 @@ impl<'a> Lowerer<'a> {
             moved_locals: HashSet::new(),
             moved_globals: HashSet::new(),
             live_after: LiveAfter::new(),
+            region: None,
             statement_last_uses: Vec::new(),
             closure_moves: Vec::new(),
             place_keys: Vec::new(),
@@ -1241,9 +1247,7 @@ impl<'a> Lowerer<'a> {
             self.counted_locals.push((reg, kind));
         }
 
-        for stmt in body {
-            self.stmt(stmt)?;
-        }
+        self.stmts(body)?;
         // falling off the end returns none, and main exits with 0
         if self.current.is_some() {
             self.leave(&[Operand::Imm(0)]);
@@ -2599,9 +2603,7 @@ impl<'a> Lowerer<'a> {
 
             StmtKind::If { test, body, orelse } if let Some(taken) = self.on_windows(test) => {
                 let branch = if taken { body } else { orelse };
-                for stmt in branch {
-                    self.stmt(stmt)?;
-                }
+                self.stmts(branch)?;
             }
 
             StmtKind::If { test, body, orelse } => {
@@ -2614,17 +2616,13 @@ impl<'a> Lowerer<'a> {
                 };
                 self.cond(test, then, otherwise)?;
                 self.start(then);
-                for stmt in body {
-                    self.stmt(stmt)?;
-                }
+                self.stmts(body)?;
                 if !orelse.is_empty() {
                     if self.current.is_some() {
                         self.jump(end);
                     }
                     self.start(otherwise);
-                    for stmt in orelse {
-                        self.stmt(stmt)?;
-                    }
+                    self.stmts(orelse)?;
                 }
                 self.start(end);
             }
@@ -2642,9 +2640,7 @@ impl<'a> Lowerer<'a> {
                     header,
                     held: None,
                 });
-                for stmt in body {
-                    self.stmt(stmt)?;
-                }
+                self.stmts(body)?;
                 self.loops.pop();
                 if self.current.is_some() {
                     self.jump(header);
@@ -2748,9 +2744,7 @@ impl<'a> Lowerer<'a> {
             if let Some(body) = body {
                 self.start(body);
             }
-            for stmt in &case.body {
-                self.stmt(stmt)?;
-            }
+            self.stmts(&case.body)?;
             if self.current.is_some() {
                 self.jump(end);
             }
@@ -4749,9 +4743,7 @@ impl<'a> Lowerer<'a> {
         body: &[Stmt],
     ) -> Result<(), String> {
         self.loops.push(Loop { exit, header, held });
-        for stmt in body {
-            self.stmt(stmt)?;
-        }
+        self.stmts(body)?;
         self.loops.pop();
         if self.current.is_some() {
             self.jump(header);
@@ -4765,7 +4757,8 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Returns whether `test` is true, if it is `gui_sys.on_windows()` or `net_sys.on_windows()`,
-    /// or `not` of one, which is a constant for the system the program is lowered for.
+    /// which are constants for the system the program is lowered for, or `gpu_sys.simulated()`,
+    /// a constant for the build, or `not` of one.
     ///
     /// For example, `not gui_sys.on_windows()` is `Some(false)` for Windows.
     fn on_windows(&self, test: &Expr) -> Option<bool> {
@@ -4775,6 +4768,9 @@ impl<'a> Lowerer<'a> {
                     if id == "gui_sys.on_windows" || id == "net_sys.on_windows" =>
                 {
                     Some(self.context.os == Os::Windows)
+                }
+                ExprKind::Name { id, .. } if id == "gpu_sys.simulated" => {
+                    Some(self.context.gpu_launch == Launch::Simulated)
                 }
                 _ => None,
             },
@@ -5414,14 +5410,19 @@ impl<'a> Lowerer<'a> {
                 })
                 .collect();
             let kernel = tree.kernel(&lists);
+            // the variable holding each list the kernel takes, for a region's slots
+            let names: HashMap<Operand, String> = first
+                .iter()
+                .map(|(name, &value)| (value, (*name).clone()))
+                .collect();
             let record = self.context.device_kernels.borrow().len();
             self.context.device_kernels.borrow_mut().push(DeviceKernel {
                 span: self.span,
                 float,
                 kernel: kernel.clone(),
             });
-            if self.context.gpu_launch {
-                launched = Some(self.launch(record, &kernel, result, len));
+            if self.context.gpu_launch.launches() {
+                launched = Some(self.launch(record, &kernel, &names, result, len));
             }
         }
 
@@ -5495,12 +5496,40 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Tries kernel number `record`, which computes `kernel` for `len` elements into the list
-    /// `result`, on a GPU: calls `stone.gpu_launch` with the kernel's number and a list of its
-    /// arguments (the result's and the lists' element addresses and the length and numbers, in
-    /// the order the kernel takes them), then branches. Control continues in a new block, where
-    /// the processor computes the elements, if the call gives 0, and goes to the block it
-    /// returns, which the caller makes the end of that computation, if it gives 1.
-    fn launch(&mut self, record: usize, kernel: &Kernel, result: VReg, len: VReg) -> BlockId {
+    /// `result`, on a GPU: calls `gpu_plan.launch` on Linux (`stone.gpu_launch` elsewhere) with
+    /// the kernel's number and a list of its arguments (the result's and the lists' element
+    /// addresses and the length and numbers, in the order the kernel takes them), then branches.
+    /// Control continues in a new block, where the processor computes the elements, if the call
+    /// gives 0, and goes to the block it returns, which the caller makes the end of that
+    /// computation, if it gives 1. On Linux a list shorter than the shortest the planner found
+    /// worth a launch (`gpu_min_len`) goes to the processor without the call.
+    fn launch(
+        &mut self,
+        record: usize,
+        kernel: &Kernel,
+        names: &HashMap<Operand, String>,
+        result: VReg,
+        len: VReg,
+    ) -> BlockId {
+        let linux = self.context.os == Os::Linux;
+        let processor = self.new_block();
+        // in a region a list may be newer on the device, so only the runtime may decide
+        if linux && self.region.is_none() {
+            let (shortest, tried) = (self.fresh(), self.new_block());
+            self.push(Inst::GpuMinLen {
+                dst: shortest,
+                record: record as u32,
+            });
+            self.terminate(Terminator::CmpBranch {
+                cond: Cond::Lt,
+                float: false,
+                lhs: Operand::Reg(len),
+                rhs: Operand::Reg(shortest),
+                then: processor,
+                otherwise: tried,
+            });
+            self.start(tried);
+        }
         let out = self.fresh();
         self.push(Inst::ListData {
             dst: out,
@@ -5531,20 +5560,34 @@ impl<'a> Lowerer<'a> {
                 offset: 0,
             });
         }
+        let lists: Vec<Option<String>> = arguments(kernel)
+            .into_iter()
+            .filter_map(|argument| match argument {
+                Argument::List(list) => Some(names.get(&list).cloned()),
+                Argument::Number(_) => None,
+            })
+            .collect();
+        let residency = self.residency(&lists);
         let ran = self.fresh();
-        let linux = self.context.os == Os::Linux;
         let callee = match linux {
-            // the driver is stone code, `gpu_nv`, linked into every build with GPUs
+            // the planner and the driver are stone code, linked into every build with GPUs
             true => Callee::Helper(function_label(&format!(
                 "{}.launch",
-                crate::stdlib::gpu::NV_MODULE
+                crate::stdlib::gpu::PLAN_MODULE
             ))),
             false => Callee::Runtime("stone.gpu_launch"),
         };
         self.push(Inst::Call {
             dsts: vec![ran],
             callee,
-            args: vec![Operand::Imm(record as i64), Operand::Reg(list)],
+            args: match linux {
+                true => vec![
+                    Operand::Imm(record as i64),
+                    Operand::Reg(list),
+                    Operand::Imm(residency),
+                ],
+                false => vec![Operand::Imm(record as i64), Operand::Reg(list)],
+            },
         });
         self.push(Inst::Release {
             src: Operand::Reg(list),
@@ -5564,7 +5607,7 @@ impl<'a> Lowerer<'a> {
             self.refuse(ran);
             self.start(answered);
         }
-        let (processor, done) = (self.new_block(), self.new_block());
+        let done = self.new_block();
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Ne,
             float: false,
@@ -5577,7 +5620,7 @@ impl<'a> Lowerer<'a> {
         done
     }
 
-    /// Stops the program with the error of a launch that `gpu_nv.launch` refused under
+    /// Stops the program with the error of a launch that `gpu_plan.launch` refused under
     /// `STONE_GPU=require`, which it gives in `ran` as minus its kind plus 16 times its detail.
     ///
     /// For example, -36 979 is kind 3 with detail 2 313, which is `8 * 256 + 9`: no code for
@@ -5610,6 +5653,7 @@ impl<'a> Lowerer<'a> {
             (3, gpu::NO_CODE),
             (4, gpu::DRIVER_ERROR),
             (5, gpu::TOO_MANY_VALUES),
+            (6, gpu::TIMED_OUT),
         ];
         for (number, message) in kinds {
             let (fail, next) = (self.new_block(), self.new_block());
@@ -5645,7 +5689,7 @@ impl<'a> Lowerer<'a> {
             self.terminate(Terminator::Fail(message.to_string(), values));
             self.start(next);
         }
-        self.terminate(Terminator::Fail(gpu::TIMED_OUT.to_string(), vec![]));
+        self.terminate(Terminator::Fail(gpu::PROBE_FAILED.to_string(), vec![]));
     }
 
     /// Computes `lhs op rhs` on two numbers or, for `+`, two strings, both of type `ty`, into
@@ -7872,6 +7916,10 @@ impl<'a> Lowerer<'a> {
             "gui_sys.on_windows" | "net_sys.on_windows" => {
                 let windows = self.context.os == Os::Windows;
                 Ok(self.finish(Operand::Imm(windows as i64), into))
+            }
+            "gpu_sys.simulated" => {
+                let simulated = self.context.gpu_launch == Launch::Simulated;
+                Ok(self.finish(Operand::Imm(simulated as i64), into))
             }
             _ if let Some(label) = module_routine(name) => {
                 let mut values = Vec::new();

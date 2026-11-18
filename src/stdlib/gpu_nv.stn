@@ -11,7 +11,6 @@
 //
 // It reaches the system through `gpu_sys`, which only stone's own modules may use.
 
-use os
 use time
 use gpu_sys
 
@@ -66,6 +65,10 @@ const at_launch = 216
 const at_arena = 224
 const at_arena_size = 232
 
+// The version of the image's layout this module reads, and the size of a kernel's shape in it.
+const image_version = 4
+const shape_size = 48
+
 // The number of GPFIFO entries in the channel's ring.
 const entries = 0x10000
 
@@ -84,6 +87,13 @@ const max_params = 64
 
 // How long a launch may take before the GPU is given up, in seconds.
 const wait_limit = 5.0
+
+// The time a byte takes to cross the bus between the processor's memory and the GPU, in
+// femtoseconds: about 12.5 GB/s, what a PCIe 4.0 x16 link carries in practice.
+const bus_byte = 80000
+
+// A time too long to count.
+const never = 0x7FFFFFFFFFFFFFFF
 
 ////////////////////////////////////////////////////////////////
 // helpers
@@ -544,10 +554,10 @@ fn load_code(s: int) -> result[int, int]:
     major = sm >> 8
     minor = sm & 0xFF
     gpu = major * 10 + minor
-    if gpu_sys.peek64(image) != 0x555047454E4F5453 or gpu_sys.peek32(image + 8) != 3:
+    if gpu_sys.peek64(image) != 0x555047454E4F5453 or gpu_sys.peek32(image + 8) != image_version:
         ret err(refusal(no_code, major * 256 + minor))
     kernels = gpu_sys.peek32(image + 20)
-    devices = shapes_at(image) + 16 * kernels
+    devices = shapes_at(image) + shape_size * kernels
     best = -1
     best_key = -1
     i = 0
@@ -585,7 +595,7 @@ fn load_code(s: int) -> result[int, int]:
 
 // Returns what a launch gives once the GPU gave up with `state`: minus the refusal code under
 // `STONE_GPU=require`, else 0, so the processor computes instead.
-fn refused(state: int) -> int:
+pub fn refused(state: int) -> int:
     m = -state
     if m % 2 == 1:
         ret -(m / 2)
@@ -604,16 +614,16 @@ fn open_all(s: int) -> result[int, int]:
     load_code(s)?
     ret ok(0)
 
-// Starts the GPU for the first launch and returns the state word: the address of the state
-// block when the GPU is ready, else minus twice the refusal code, plus 1 under
-// `STONE_GPU=require`.
-fn start() -> int:
-    setting = os.env("STONE_GPU").unwrap_or("")
-    if setting == "off":
-        ret -2
-    require = 0
-    if setting == "require":
-        require = 1
+// Starts the GPU and returns the state word, which it also keeps: the address of the state
+// block when the GPU is ready, else minus twice the refusal code, plus 1 when `require` is 1
+// (`STONE_GPU=require`).
+pub fn open(require: int) -> int:
+    state = opened(require)
+    gpu_sys.set_state(state)
+    ret state
+
+// Starts the GPU as `open` does, without keeping the state word.
+fn opened(require: int) -> int:
     s = gpu_sys.mmap(0, block_size, 3, 0x22, -1, 0)
     if s < 0:
         ret -(refusal(driver_error, -s) * 2 + require)
@@ -623,6 +633,29 @@ fn start() -> int:
             ret s
         case err(code):
             ret -(code * 2 + require)
+
+// Measures what reaching the GPU of the state block `s` costs, in femtoseconds: the round trip
+// of a submission that does nothing, the least of three, and the time per byte of moving a
+// list to the GPU and back. Lists live in memory the GPU reads over the bus, so a byte costs a
+// copy into that memory plus a crossing of the bus each way.
+pub fn probe(s: int) -> result[tuple[int, int, int], int]:
+    latency = never
+    for _ in range(3):
+        started = time.clock()
+        submit(s, field(s, at_pushes) + 24)?
+        latency = latency.min(femtoseconds(time.clock() - started))
+    size = 0x400000
+    at = arena(s, 2 * size)?
+    // the first copy touches the memory, so the second is the one timed
+    gpu_sys.copy(at + size, at, size)
+    started = time.clock()
+    gpu_sys.copy(at + size, at, size)
+    per_byte = femtoseconds(time.clock() - started) / size
+    ret ok((latency, per_byte + bus_byte, per_byte + bus_byte))
+
+// Returns `seconds` in femtoseconds, or `never` for a time too long to count.
+fn femtoseconds(seconds: float) -> int:
+    ret int(seconds * 1e15).unwrap_or(never)
 
 ////////////////////////////////////////////////////////////////
 // launching
@@ -671,16 +704,8 @@ fn write_qmd(at: int, sm: int, program: int, size: int, registers: int, grid: in
         set_bits(at, 1202, 1202, 1)
         set_bits(at, 1215, 1203, align(literals_size, 16))
 
-// Returns the state word, starting the GPU on the first launch.
-fn ready() -> int:
-    state = gpu_sys.state()
-    if state == 0:
-        state = start()
-        gpu_sys.set_state(state)
-    ret state
-
 // Gives the GPU up for good after `code` went wrong, and returns what the launch gives.
-fn give_up(s: int, code: int) -> int:
+pub fn give_up(s: int, code: int) -> int:
     state = -(code * 2 + field(s, at_require))
     gpu_sys.set_state(state)
     ret refused(state)
@@ -700,11 +725,17 @@ fn arena(s: int, size: int) -> result[int, int]:
 // when the processor should, or a refusal's negative under `STONE_GPU=require`, and an error
 // when the GPU must be given up.
 fn run(s: int, record: int, args: list[int]) -> result[int, int]:
+    ret run_placed(s, record, args, 0)
+
+// Runs the kernel of record `record` over `args` as `run` does, except that each list whose bit
+// is set in `placed` is already in memory the GPU reads (from `alloc_device`), where the kernel
+// reads it or, for the result, writes it, with no copy.
+fn run_placed(s: int, record: int, args: list[int], placed: int) -> result[int, int]:
     if args.len() < 2 or args[1] <= 0:
         ret ok(0)
     image = gpu_sys.image()
     k = gpu_sys.peek32(image + 32 + 4 * record)
-    shape = shapes_at(image) + 16 * k
+    shape = shapes_at(image) + shape_size * k
     count = gpu_sys.peek32(shape)
     fails = gpu_sys.peek32(shape + 4) & 1
     lists = gpu_sys.peek64(shape + 8)
@@ -723,7 +754,7 @@ fn run(s: int, record: int, args: list[int]) -> result[int, int]:
     total = 0
     i = 0
     while i < args.len():
-        if (lists >> i) & 1 == 1:
+        if (lists >> i) & 1 == 1 and (placed >> i) & 1 == 0:
             total += slot
         i += 1
     at = arena(s, total)?
@@ -742,7 +773,7 @@ fn run(s: int, record: int, args: list[int]) -> result[int, int]:
     i = 0
     while i < args.len():
         v = args[i]
-        if (lists >> i) & 1 == 1:
+        if (lists >> i) & 1 == 1 and (placed >> i) & 1 == 0:
             // the kernel writes every element of the result, so only operands are copied in
             if i > 0:
                 gpu_sys.copy(at, v, n * 8)
@@ -768,16 +799,46 @@ fn run(s: int, record: int, args: list[int]) -> result[int, int]:
     submit(s, end)?
     if fails == 1 and gpu_sys.peek64(flag) != 0:
         ret ok(0)
-    gpu_sys.copy(args[0], out, n * 8)
+    if placed & 1 == 0:
+        gpu_sys.copy(args[0], out, n * 8)
     ret ok(1)
 
-// Runs the kernel of record `record` over `args` on the GPU, as `run` describes, starting the
-// driver on the first call. Gives 1 when the GPU computed the result, 0 when the processor
-// should, or `-(kind + 16 * detail)` when `STONE_GPU=require` refuses to compute on the
-// processor.
+// Returns the address of `bytes` bytes of memory the GPU reads and writes and the processor
+// copies to and from, which the program keeps until it ends, or -1.
+pub fn alloc_device(bytes: int) -> int:
+    s = gpu_sys.state()
+    if s <= 0:
+        ret -1
+    match alloc(s, bytes):
+        case ok(made):
+            at, _ = made
+            ret at
+        case err(_):
+            ret -1
+
+// Returns what a byte of a list kept in `alloc_device`'s memory costs a kernel that reads or
+// writes it, in femtoseconds: the memory is the processor's, so each byte crosses the bus.
+pub fn device_byte() -> int:
+    ret bus_byte
+
+// Runs the kernel of record `record` over `args` as `launch` does, with the lists whose bits
+// are set in `placed` already in `alloc_device`'s memory.
+pub fn launch_placed(record: int, args: list[int], placed: int) -> int:
+    state = gpu_sys.state()
+    if state <= 0:
+        ret refused(state)
+    match run_placed(state, record, args, placed):
+        case ok(v):
+            ret v
+        case err(code):
+            ret give_up(state, code)
+
+// Runs the kernel of record `record` over `args` on the GPU, as `run` describes, once `open`
+// started the driver. Gives 1 when the GPU computed the result, 0 when the processor should, or
+// `-(kind + 16 * detail)` when `STONE_GPU=require` refuses to compute on the processor.
 pub fn launch(record: int, args: list[int]) -> int:
-    state = ready()
-    if state < 0:
+    state = gpu_sys.state()
+    if state <= 0:
         ret refused(state)
     match run(state, record, args):
         case ok(v):

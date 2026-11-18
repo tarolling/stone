@@ -97,6 +97,10 @@ enum Backend {
     /// for 8.9), run with `STONE_GPU=require`, so every kernel the GPU can run must run there
     /// and print what the processor does.
     GpuDevice(u32),
+    /// `stone build --gpu sm_75` for the host with `STONE_GPU_SIMULATE` set, so the runtime
+    /// computes each kernel on the processor as a GPU would, run with `STONE_GPU=require`, so
+    /// every kernel is launched and every path a launch takes is reached without a GPU.
+    GpuSimulate,
     /// `stone build` for the host with `STONE_VERIFY_FACTS` set, so every check an optimizer
     /// pass removed on a proof is still made, and fails with `compiler bug` if the proof was
     /// wrong.
@@ -140,6 +144,7 @@ impl Backend {
             Backend::Level(_) => "build-aarch64v9",
             Backend::Gpu => "build-gpu",
             Backend::GpuDevice(_) => "build-gpu-device",
+            Backend::GpuSimulate => "build-gpu-simulate",
             Backend::Verify => "build-verify",
         }
     }
@@ -405,6 +410,7 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
         | Backend::Level(_)
         | Backend::Gpu
         | Backend::GpuDevice(_)
+        | Backend::GpuSimulate
         | Backend::Verify => {
             let suffix = match backend {
                 Backend::Windows(_) => ".exe",
@@ -412,6 +418,7 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 | Backend::Level(_)
                 | Backend::Gpu
                 | Backend::GpuDevice(_)
+                | Backend::GpuSimulate
                 | Backend::Verify => std::env::consts::EXE_SUFFIX,
                 _ => "",
             };
@@ -432,6 +439,13 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 }
                 Backend::GpuDevice(capability) => {
                     build.arg("--gpu").arg(format!("sm_{capability}"));
+                }
+                Backend::GpuSimulate => {
+                    // no machine code is needed, so no ptxas runs or warns
+                    build
+                        .args(["--gpu", "sm_75"])
+                        .env("STONE_GPU_SIMULATE", "1")
+                        .env("STONE_PTXAS", "/nonexistent/ptxas");
                 }
                 Backend::Verify => {
                     build.env("STONE_VERIFY_FACTS", "1");
@@ -490,7 +504,7 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                     command.env("WSLENV", shared);
                     command
                 }
-                Backend::GpuDevice(_) => {
+                Backend::GpuDevice(_) | Backend::GpuSimulate => {
                     let mut command = Command::new(&exe);
                     command.env("STONE_GPU", "require");
                     command
@@ -664,6 +678,17 @@ fn gpu_compiler_matches_expected() {
         return;
     }
     check_all(Backend::Gpu);
+}
+
+/// Builds every program with a simulated GPU and runs it with `STONE_GPU=require`, so every
+/// kernel is computed from its program as a GPU would and every path around a launch is taken,
+/// and each must print what the processor's loop does and free everything.
+#[test]
+fn gpu_simulated_compiler_matches_expected() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    check_all(Backend::GpuSimulate);
 }
 
 /// Builds every program for the host's NVIDIA GPU and runs it with `STONE_GPU=require`, so each

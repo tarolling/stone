@@ -18,6 +18,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   Ampere (`sm_86`) and Ada (`sm_89`) GPUs, computing on the processor anywhere else;
   `STONE_GPU=off` and `STONE_GPU=require` work as on Windows. See the new guide, "Running code
   on the GPU".
+- Linux executables built with `--gpu` decide where each piece of arithmetic on lists runs. The
+  compiler records what an element costs on the processor and on the GPU, the program measures
+  its GPU's launch latency and transfer speed when it starts it (treating a GPU that fails this
+  test as unusable), and a list too short to repay a launch never leaves the processor, at the
+  cost of one compare. `STONE_GPU=always` launches every kernel whatever its length.
+- Lists stay on the GPU across consecutive statements of arithmetic on lists and across the
+  turns of a loop that only computes on them, and come back once, where the program next reads
+  them; a zero divisor on the way still reports the interpreter's element and position.
+  `STONE_GPU_SIMULATE=1 stone build --gpu ...` builds a Linux program whose GPU is simulated on
+  the processor, for testing this without one.
 
 - `STONE_VERIFY_FACTS=1 stone build` keeps every check an optimization proved never fails and
   removed, as a check that stops the program with `compiler bug: <pass> removed a check that

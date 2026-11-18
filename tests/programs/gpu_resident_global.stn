@@ -1,0 +1,17 @@
+// a call in top-level code may read a global, so a loop that calls keeps nothing on the device
+
+fn first() -> float:
+    ret xs[0]
+
+xs = [1.0, 2.0]
+s = 0.0
+for _ in range(3):
+    s = first()
+    xs = xs * 2.0 + 1.0
+print(xs, s)
+
+ys = [3.0, 4.0]
+zs = ys * 2.0
+total = first()
+ws = zs + ys
+print(ws, total)

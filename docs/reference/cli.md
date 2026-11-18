@@ -121,10 +121,16 @@ the processor, so the executable runs on any machine. The results are the same e
 a zero divisor is still reported at the element and position `stone run` reports.
 
 The `STONE_GPU` environment variable changes this when the program runs: `off` computes
-everything on the processor, and `require` makes a program that cannot use the GPU stop with
-an error at the arithmetic instead, such as `no GPU ran this program's kernels: nvcuda.dll is
-missing or too old`, `there is no CUDA device`, `it has no code for compute capability 8.6`,
-or `CUDA error 2`.
+everything on the processor, `always` launches every kernel whatever the length of its lists
+(a Linux program otherwise launches only lists long enough to repay reaching the GPU), and
+`require` does as `always` but makes a program that cannot use the GPU stop with an error at
+the arithmetic instead, such as `no GPU ran this program's kernels: nvcuda.dll is missing or
+too old`, `there is no CUDA device`, `it has no code for compute capability 8.6`, or `CUDA
+error 2`.
+
+With `STONE_GPU_SIMULATE` set, a Linux `stone build --gpu` makes a program whose GPU is
+simulated: it computes each kernel on the processor, as the GPU would, from a description the
+build carries, so tests reach every path a launch takes on a machine without a GPU.
 
 A Linux executable built with `--gpu` runs the machine code `ptxas` made on an NVIDIA GPU too,
 on x86-64 and arm64, without libcuda or any other library: it speaks to NVIDIA's kernel driver

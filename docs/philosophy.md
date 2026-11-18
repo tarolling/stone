@@ -310,9 +310,15 @@ use the GPU. A Linux program, which uses no C library and so cannot load libcuda
 NVIDIA's kernel driver itself, through ioctls on `/dev/nvidia*`, from a driver written in stone
 (`gpu_nv`) over a few native primitives, and runs the machine code `ptxas` made at build time;
 so far it knows driver version 595 and Ampere and Ada GPUs, and computes on the processor
-anywhere else. Deciding when a list is large enough to be worth sending to the GPU, keeping
-lists on the GPU between pieces of arithmetic, other drivers and generations, and AMD GPUs are
-future work.
+anywhere else. The compiler also decides where each piece runs, since a GPU pays only when what
+it saves outweighs reaching it: it records each kernel's cost per element on either side, the
+program measures its GPU's latency and bandwidth when it starts it, and a list too short to
+repay a launch stays on the processor for the price of one compare. Lists stay on the GPU
+through runs of statements and loops that only compute on them, coming back once, where the
+processor next reads them, which the compiler finds by the same liveness that moves values. On
+Linux those lists live in processor memory the GPU reads so far, not in its own; putting them
+there, the same decisions on Windows, other drivers and generations, and AMD GPUs are future
+work.
 Vector code beyond arithmetic on lists (searching strings, comparing lists, summing them),
 splitting a value's live range around calls, and removing reference counts it can prove
 redundant beyond moves at last use are future work.

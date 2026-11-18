@@ -7,7 +7,9 @@
 //! every element whatever the launch's shape: a thread starts at its global index and steps by
 //! the number of threads.
 
+use super::cost::{self, Cost};
 use super::ir::{Block, BlockId, Inst, Kernel, Op, Special, Terminator, Ty, Value};
+use crate::codegen::Target;
 use crate::codegen::ir::{self, BinOp, Cond, DeviceKernel, Operand};
 use std::collections::HashMap;
 
@@ -21,6 +23,9 @@ pub struct Numbered {
     pub record_kernel: Vec<usize>,
     /// What a launch needs to know about each kernel besides its code, indexed like `kernels`.
     pub shapes: Vec<Shape>,
+    /// Each kernel's arithmetic as [`program`] writes it, for a simulated GPU, indexed like
+    /// `kernels`.
+    pub programs: Vec<Vec<u8>>,
 }
 
 /// How a kernel is launched, apart from its machine code.
@@ -35,6 +40,8 @@ pub struct Shape {
     /// The parameters that are the address of a list's elements, the result's included, as bit
     /// `i` for parameter `i`; a kernel of more than 64 parameters is never launched.
     pub lists: u64,
+    /// What computing an element costs on the processor and on a GPU.
+    pub cost: Cost,
 }
 
 impl Shape {
@@ -54,18 +61,20 @@ impl Shape {
 /// For example, `c = a * 2.0 + b` in two copies of a generic function records the same
 /// arithmetic twice, which gives one kernel with two sites.
 pub fn kernels(recorded: &[DeviceKernel]) -> Result<Vec<Kernel>, String> {
-    numbered(recorded).map(|numbered| numbered.kernels)
+    // the code is the same whatever the processor, which only changes the costs
+    numbered(recorded, Target::X64_LINUX).map(|numbered| numbered.kernels)
 }
 
 /// Returns the kernels of `recorded` as [`kernels`] does, and for each record the kernel that
-/// computes it.
+/// computes it, with what each kernel costs per element on `target`'s processor.
 ///
 /// For example, records of `a * 2.0`, `b * 2.0` (the same code), and `a * 4.0` give two kernels
 /// and the map `[0, 0, 1]`.
-pub fn numbered(recorded: &[DeviceKernel]) -> Result<Numbered, String> {
+pub fn numbered(recorded: &[DeviceKernel], target: Target) -> Result<Numbered, String> {
     let mut kernels: Vec<Kernel> = Vec::new();
     let mut record_kernel = Vec::with_capacity(recorded.len());
     let mut shapes = Vec::new();
+    let mut programs = Vec::new();
     for record in recorded {
         let mut kernel = translate(&record.kernel, record.float)?;
         match kernels.iter().position(|known| known.same_code(&kernel)) {
@@ -87,13 +96,17 @@ pub fn numbered(recorded: &[DeviceKernel]) -> Result<Numbered, String> {
                     .iter()
                     .enumerate()
                     .filter(|&(index, &ty)| ty == Ty::Ptr && index < Shape::MAX_PARAMS as usize)
-                    .fold(0, |lists, (index, _)| lists | 1 << index);
+                    .fold(0u64, |lists, (index, _)| lists | 1 << index);
+                // the result is the first list, and the others are what the kernel reads
+                let read = lists.count_ones().saturating_sub(1);
                 shapes.push(Shape {
                     float: record.float,
                     fail_flag,
                     params: kernel.params.len() as u32,
                     lists,
+                    cost: cost::estimate(&record.kernel, record.float, read, target),
                 });
+                programs.push(program(&record.kernel));
                 kernels.push(kernel);
             }
         }
@@ -102,7 +115,75 @@ pub fn numbered(recorded: &[DeviceKernel]) -> Result<Numbered, String> {
         kernels,
         record_kernel,
         shapes,
+        programs,
     })
+}
+
+/// The operations of a [`program`], one byte each. A read names the parameter it reads in the
+/// byte after it, and a constant's 8 bytes follow it, little-endian.
+pub mod op {
+    /// Pushes the element of the list whose elements' address is the parameter.
+    pub const ELEMENT: u8 = 1;
+    /// Pushes the parameter, a number the same for every element.
+    pub const NUMBER: u8 = 2;
+    /// Pushes the constant in the next 8 bytes.
+    pub const CONSTANT: u8 = 3;
+    pub const ADD: u8 = 16;
+    pub const SUB: u8 = 17;
+    pub const MUL: u8 = 18;
+    pub const DIV: u8 = 19;
+    pub const NEG: u8 = 20;
+    pub const AND: u8 = 21;
+    pub const OR: u8 = 22;
+    pub const XOR: u8 = 23;
+}
+
+/// Returns `kernel` as a program for a stack machine that computes one element: its values and
+/// operations in postfix order, each read naming the kernel's parameter it reads (2 for the
+/// first after the result's address and the length). Whether it computes floats or ints is the
+/// kernel's shape's.
+///
+/// For example, `fadd(fmul([v1], 2.0), [v2])` is `ELEMENT 2, CONSTANT <2.0's bits>, MUL,
+/// ELEMENT 3, ADD`.
+pub fn program(kernel: &ir::Kernel) -> Vec<u8> {
+    fn write(kernel: &ir::Kernel, params: &[Operand], out: &mut Vec<u8>) {
+        let param = |operand: &Operand| 2 + params.iter().position(|p| p == operand).unwrap() as u8;
+        match kernel {
+            ir::Kernel::Element(list) => out.extend([op::ELEMENT, param(list)]),
+            ir::Kernel::Number(Operand::Imm(value)) => {
+                out.push(op::CONSTANT);
+                out.extend(value.to_le_bytes());
+            }
+            ir::Kernel::Number(number) => out.extend([op::NUMBER, param(number)]),
+            ir::Kernel::Binary(binary, lhs, rhs) => {
+                write(lhs, params, out);
+                write(rhs, params, out);
+                out.push(match binary {
+                    BinOp::Add => op::ADD,
+                    BinOp::Sub => op::SUB,
+                    BinOp::Mul => op::MUL,
+                    BinOp::Div => op::DIV,
+                    BinOp::And => op::AND,
+                    BinOp::Or => op::OR,
+                    // only what `translate` accepts is recorded
+                    _ => op::XOR,
+                });
+            }
+            ir::Kernel::Neg(operand) => {
+                write(operand, params, out);
+                out.push(op::NEG);
+            }
+        }
+    }
+    let params: Vec<Operand> = arguments(kernel)
+        .into_iter()
+        .map(|argument| match argument {
+            Argument::List(operand) | Argument::Number(operand) => operand,
+        })
+        .collect();
+    let mut out = Vec::new();
+    write(kernel, &params, &mut out);
+    out
 }
 
 /// Returns the kernel that computes `kernel` for every element, of floats if `float` and of ints
@@ -617,12 +698,15 @@ b5:
             float: true,
             kernel: *binary(BinOp::Mul, list(first), number(constant.to_bits() as i64)),
         };
-        let numbered = numbered(&[
-            record(1, 3, 2.0),
-            record(2, 9, 2.0),
-            record(3, 3, 4.0),
-            record(4, 3, 2.0),
-        ])
+        let numbered = numbered(
+            &[
+                record(1, 3, 2.0),
+                record(2, 9, 2.0),
+                record(3, 3, 4.0),
+                record(4, 3, 2.0),
+            ],
+            Target::X64_LINUX,
+        )
         .unwrap();
         assert_eq!(numbered.kernels.len(), 2);
         assert_eq!(numbered.record_kernel, [0, 0, 1, 0]);
@@ -632,8 +716,11 @@ b5:
             fail_flag: false,
             params: 3,
             lists: 0b101,
+            cost: numbered.shapes[0].cost,
         };
         assert_eq!(numbered.shapes, [shape, shape]);
+        // one list in and the result out
+        assert_eq!((shape.cost.in_bytes, shape.cost.out_bytes), (8, 8));
     }
 
     #[test]
@@ -646,21 +733,48 @@ b5:
             float: true,
             kernel: *kernel,
         };
-        let numbered = numbered(&[
-            record(binary(
-                BinOp::Add,
-                binary(BinOp::Mul, list(1), x.clone()),
-                list(2),
-            )),
-            record(binary(BinOp::Div, list(1), x)),
-        ])
+        let numbered = numbered(
+            &[
+                record(binary(
+                    BinOp::Add,
+                    binary(BinOp::Mul, list(1), x.clone()),
+                    list(2),
+                )),
+                record(binary(BinOp::Div, list(1), x)),
+            ],
+            Target::X64_LINUX,
+        )
         .unwrap();
         // out, length, a, x, b
         assert_eq!(numbered.shapes[0].params, 5);
         assert_eq!(numbered.shapes[0].lists, 0b10101);
+        // a and b in, the result out
+        assert_eq!(numbered.shapes[0].cost.in_bytes, 16);
+        assert_eq!(numbered.shapes[1].cost.in_bytes, 8);
         // out, length, a, x, flag
         assert_eq!(numbered.shapes[1].params, 5);
         assert!(numbered.shapes[1].fail_flag);
         assert_eq!(numbered.shapes[1].lists, 0b101);
+    }
+
+    #[test]
+    fn a_kernel_is_a_postfix_program_for_a_simulated_gpu() {
+        // a * 2.0 + b * x, with x a number in a register, then -a
+        let two = 2.0f64.to_bits() as i64;
+        let x = Box::new(ir::Kernel::Number(Operand::Reg(VReg(7))));
+        let kernel = binary(
+            BinOp::Add,
+            binary(BinOp::Mul, list(1), number(two)),
+            binary(BinOp::Mul, list(2), x),
+        );
+        let mut expected = vec![op::ELEMENT, 2, op::CONSTANT];
+        expected.extend(two.to_le_bytes());
+        expected.extend([op::MUL, op::ELEMENT, 3, op::NUMBER, 4, op::MUL, op::ADD]);
+        assert_eq!(program(&kernel), expected);
+        let negated = Box::new(ir::Kernel::Neg(list(1)));
+        assert_eq!(program(&negated), [op::ELEMENT, 2, op::NEG]);
+        // a list read twice is one parameter
+        let square = binary(BinOp::Mul, list(1), list(1));
+        assert_eq!(program(&square), [op::ELEMENT, 2, op::ELEMENT, 2, op::MUL]);
     }
 }

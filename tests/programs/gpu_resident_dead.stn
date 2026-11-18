@@ -1,0 +1,17 @@
+// a list no later statement reads leaves the device as soon as its last reader is done
+
+fn f(x: list[float]) -> list[float]:
+    t = x * 2.0
+    u = t + 1.0
+    v = u * u
+    w = v - x
+    ret w
+
+fn g(x: list[int]) -> list[int]:
+    unused = x * 7
+    y = x + 1
+    z = y * y
+    ret z
+
+print(f([1.0, 2.0, 3.0]))
+print(g([1, 2, 3]))

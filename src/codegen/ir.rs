@@ -448,6 +448,10 @@ pub enum Inst {
     },
     /// Writes a global, also marking it assigned.
     StoreGlobal { name: String, src: Operand },
+    /// Reads the shortest list worth launching kernel record `record` on a GPU, from the table
+    /// `stone.gpu_min_len` that the runtime fills on its first launch (0 until then, so the
+    /// first launch always calls in).
+    GpuMinLen { dst: VReg, record: u32 },
     /// The address of a string literal.
     StrAddr { dst: VReg, text: String },
     /// The address of a bytes literal, laid out as a string is.
@@ -669,6 +673,7 @@ impl Inst {
             | Inst::BitCount { dst, .. }
             | Inst::Compare { dst, .. }
             | Inst::LoadGlobal { dst, .. }
+            | Inst::GpuMinLen { dst, .. }
             | Inst::StrAddr { dst, .. }
             | Inst::BytesAddr { dst, .. }
             | Inst::ListLen { dst, .. }
@@ -736,7 +741,10 @@ impl Inst {
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. }
             | Inst::Never { lhs, rhs, .. } => vec![*lhs, *rhs],
-            Inst::LoadGlobal { .. } | Inst::StrAddr { .. } | Inst::BytesAddr { .. } => vec![],
+            Inst::LoadGlobal { .. }
+            | Inst::GpuMinLen { .. }
+            | Inst::StrAddr { .. }
+            | Inst::BytesAddr { .. } => vec![],
             Inst::ListLen { list, .. } | Inst::ListData { list, .. } => vec![*list],
             Inst::MinRowLen { list, count, .. } => vec![*list, *count],
             Inst::StrLen { text, .. } => vec![*text],
@@ -1158,6 +1166,7 @@ impl fmt::Display for Inst {
                 write!(f, "{dst} = load_global{suffix} {name}")
             }
             Inst::StoreGlobal { name, src } => write!(f, "store_global {name}, {src}"),
+            Inst::GpuMinLen { dst, record } => write!(f, "{dst} = gpu_min_len {record}"),
             Inst::StrAddr { dst, text } => write!(f, "{dst} = str {text:?}"),
             Inst::BytesAddr { dst, bytes } => {
                 write!(f, "{dst} = {}", crate::stdlib::repr_bytes(bytes))

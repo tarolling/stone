@@ -858,6 +858,11 @@ fn build_embeds_the_machine_code_of_each_gpu_in_the_program() {
     }
     assert!(!image.shapes[0].fail_flag);
     assert!(image.shapes[1].fail_flag);
+    // each kernel carries what an element costs, for the runtime to pick where to compute
+    for shape in &image.shapes {
+        assert_eq!((shape.cost.in_bytes, shape.cost.out_bytes), (16, 8));
+        assert!(shape.cost.cpu_fs > shape.cost.gpu_fs, "{shape:?}");
+    }
 
     if cfg!(target_os = "linux") {
         let ran = Command::new(&exe).output().unwrap();
@@ -900,6 +905,16 @@ fn a_gpu_build_without_ptxas_embeds_an_image_with_no_devices() {
     let off = Command::new(&exe).env("STONE_GPU", "off").output().unwrap();
     assert_eq!(
         String::from_utf8_lossy(&off.stdout),
+        "[2.5, 4.25]\n[2.0, 8.0]\n"
+    );
+    // `always` launches even two elements, and computes on the processor when it cannot
+    let always = Command::new(&exe)
+        .env("STONE_GPU", "always")
+        .output()
+        .unwrap();
+    assert!(always.status.success(), "{always:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&always.stdout),
         "[2.5, 4.25]\n[2.0, 8.0]\n"
     );
     // whether or not this machine has a driver, no GPU can run an image without code

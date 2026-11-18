@@ -1345,6 +1345,15 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
+            Inst::GpuMinLen { dst, record } => {
+                let dst = frame.reg(*dst)?;
+                let label = crate::codegen::gpu::min_length_label(*record);
+                let target = self.target(dst);
+                self.emit(&format!("\tadrp\tx16, {label}"));
+                self.emit(&format!("\tldr\t{target}, [x16, :lo12:{label}]"));
+                self.store(dst, target);
+            }
+
             Inst::StoreGlobal { name, src } => {
                 let label = global_label(name);
                 let src = frame.value(*src)?;

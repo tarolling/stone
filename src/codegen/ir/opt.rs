@@ -1005,7 +1005,8 @@ fn is_removable(inst: &Inst) -> bool {
         | Inst::FunctionStatic { .. }
         | Inst::EnumTag { .. }
         | Inst::FieldGet { .. }
-        | Inst::LoadGlobal { checked: false, .. } => true,
+        | Inst::LoadGlobal { checked: false, .. }
+        | Inst::GpuMinLen { .. } => true,
         _ => false,
     }
 }

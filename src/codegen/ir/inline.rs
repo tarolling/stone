@@ -350,6 +350,10 @@ pub(super) fn rename_inst(
             checked,
         },
         Inst::StoreGlobal { name, src } => Inst::StoreGlobal { name, src: o(src) },
+        Inst::GpuMinLen { dst, record } => Inst::GpuMinLen {
+            dst: reg(dst),
+            record,
+        },
         Inst::StrAddr { dst, text } => Inst::StrAddr {
             dst: reg(dst),
             text,

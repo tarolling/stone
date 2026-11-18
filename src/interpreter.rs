@@ -1472,6 +1472,21 @@ impl<'out> Interpreter<'out> {
         Ok(())
     }
 
+    /// Defines everything `module` defines and calls its function `name` with `args`, without
+    /// running any of its top-level statements, returning what the function gives. Tests of
+    /// stone's own modules use it to call a function no program can name.
+    ///
+    /// For example, calling `gpu_plan.mode_of` with `Value::Str("off")` gives its int for off.
+    pub fn call_function(
+        &mut self,
+        module: &Mod,
+        name: &str,
+        args: Vec<Value>,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        self.define_module(module);
+        Ok(self.invoke(name, args, false)?.0)
+    }
+
     /// Defines the functions, enums, and structs of `module` and returns its top-level
     /// statements, resolved and ready to run.
     fn define_module(&mut self, module: &Mod) -> Vec<code::Stmt> {

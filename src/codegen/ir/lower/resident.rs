@@ -81,10 +81,10 @@ impl Lowerer<'_> {
         Ok(())
     }
 
-    /// Returns whether a block may hold a region: in a Linux build that launches kernels (whose
-    /// planner is stone code), outside any other region.
+    /// Returns whether a block may hold a region: in a build that launches kernels (whose
+    /// planner is stone code, on Linux and Windows), outside any other region.
     fn keeps_lists(&self) -> bool {
-        self.context.gpu_launch.launches() && self.context.os == Os::Linux && self.region.is_none()
+        self.context.gpu_launch.launches() && self.context.os != Os::MacOs && self.region.is_none()
     }
 
     /// Returns `stmt` as a statement of arithmetic a region can keep: `x = <arithmetic>` or

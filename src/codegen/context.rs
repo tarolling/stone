@@ -123,7 +123,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 62] = [
+pub const MODULE_ROUTINES: [(&str, &str); 65] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -191,6 +191,9 @@ pub const MODULE_ROUTINES: [(&str, &str); 62] = [
     ("gpu_sys.peek_float", "stone.gpu_peek_float"),
     ("gpu_sys.poke_float", "stone.gpu_poke_float"),
     ("gpu_sys.min_lengths", "stone.gpu_min_lengths_address"),
+    ("gpu_sys.nvcuda", "stone.gpu_nvcuda"),
+    ("gpu_sys.symbol", "stone.gpu_symbol"),
+    ("gpu_sys.call", "stone.gpu_call"),
 ];
 
 /// The routines of the `fs` module that can return an error, which needs the routines that
@@ -274,7 +277,6 @@ pub const FALLIBLE_ROUTINES: &[&str] = &[
     "stone.os_cwd",
     "stone.time_sleep",
     "stone.map_missing_str",
-    "stone.gpu_launch",
 ];
 
 /// A runtime error the code can jump to, from [`Context::fail_label`] or [`Context::fail_at`].
@@ -1114,13 +1116,7 @@ impl Context {
     /// through the leak check every program with strings or lists ends with, which looks for
     /// `STONE_LEAK_CHECK`.
     pub fn needs_env(&self) -> bool {
-        self.counts_references
-            || self.uses(&[
-                "stone.os_env",
-                "stone.os_has_env",
-                "stone.os_run",
-                "stone.gpu_launch",
-            ])
+        self.counts_references || self.uses(&["stone.os_env", "stone.os_has_env", "stone.os_run"])
     }
 
     /// Returns the runtime routines of a builtin module that the program calls, by the prefix

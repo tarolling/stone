@@ -673,8 +673,8 @@ fn cross_compiler_matches_expected() {
 /// arguments the launch is given must be released.
 #[test]
 fn gpu_compiler_matches_expected() {
-    // only Linux programs launch kernels so far
-    if !cfg!(target_os = "linux") {
+    // Linux and x86-64 Windows programs launch kernels
+    if !launches_kernels() {
         return;
     }
     check_all(Backend::Gpu);
@@ -685,22 +685,43 @@ fn gpu_compiler_matches_expected() {
 /// and each must print what the processor's loop does and free everything.
 #[test]
 fn gpu_simulated_compiler_matches_expected() {
-    if !cfg!(target_os = "linux") {
+    if !launches_kernels() {
         return;
     }
     check_all(Backend::GpuSimulate);
 }
 
+/// Returns whether programs built for the host launch kernels: on Linux and x86-64 Windows.
+fn launches_kernels() -> bool {
+    cfg!(any(
+        target_os = "linux",
+        all(target_os = "windows", target_arch = "x86_64")
+    ))
+}
+
 /// Builds every program for the host's NVIDIA GPU and runs it with `STONE_GPU=require`, so each
-/// kernel runs on the GPU and must print what the processor's loop does. Skips without a driver,
-/// a GPU `nvidia-smi` reports, or `ptxas` (`STONE_PTXAS`, else on `PATH`).
+/// kernel runs on the GPU and must print what the processor's loop does. Skips without a driver
+/// (`/dev/nvidiactl` on Linux, `nvcuda.dll` on Windows) or a GPU `nvidia-smi` reports, and on
+/// Linux without `ptxas` (`STONE_PTXAS`, else on `PATH`), since Linux programs run only machine
+/// code; Windows ones carry PTX, which the driver compiles.
 #[test]
 fn gpu_device_compiler_matches_expected() {
-    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+    let windows = cfg!(all(target_os = "windows", target_arch = "x86_64"));
+    if !cfg!(all(target_os = "linux", target_arch = "x86_64")) && !windows {
         return;
     }
-    if !Path::new("/dev/nvidiactl").exists() {
-        eprintln!("skipped running kernels on a GPU: /dev/nvidiactl was not found");
+    let driver = match windows {
+        true => {
+            let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+            Path::new(&root).join(r"System32\nvcuda.dll")
+        }
+        false => Path::new("/dev/nvidiactl").to_path_buf(),
+    };
+    if !driver.exists() {
+        eprintln!(
+            "skipped running kernels on a GPU: {} was not found",
+            driver.display()
+        );
         return;
     }
     let Some(capability) = gpu_capability() else {
@@ -708,7 +729,7 @@ fn gpu_device_compiler_matches_expected() {
         return;
     };
     let ptxas = std::env::var("STONE_PTXAS").unwrap_or_else(|_| "ptxas".to_string());
-    if !runs(&ptxas) {
+    if !windows && !runs(&ptxas) {
         eprintln!("skipped running kernels on a GPU: {ptxas} was not found");
         return;
     }

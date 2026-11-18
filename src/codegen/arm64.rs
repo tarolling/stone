@@ -693,9 +693,6 @@ impl Arm64Generator {
         if !fs.is_empty() {
             fs::fs_runtime(self, &fs);
         }
-        if self.ctx.uses(&["stone.gpu_launch"]) {
-            gpu::gpu_runtime(self);
-        }
         let gpu = self.ctx.module_routines("stone.gpu_");
         if !gpu.is_empty() {
             let records = self.ctx.program.device_kernels.len();

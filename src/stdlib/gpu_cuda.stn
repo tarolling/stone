@@ -1,0 +1,465 @@
+// The internal `gpu_cuda` module, through which a Windows program built with `--gpu` runs the
+// kernels of its GPU image on an NVIDIA GPU, calling NVIDIA's CUDA driver interface, which the
+// display driver installs as `nvcuda.dll`. It is the Windows counterpart of `gpu_nv`, with the
+// same functions, so the planner drives either.
+//
+// The first launch loads `nvcuda.dll` from the system directory, finds the functions it calls,
+// makes the first GPU's primary context current, loads the image's cubin for the GPU or else
+// its PTX (which the driver compiles), and finds every kernel. A launch then copies the lists a
+// kernel reads to the GPU, runs it, waits, and copies the result back, unless the GPU found a
+// zero divisor, when it gives 0 and the processor computes the arithmetic again. Anything
+// unexpected makes it give up for good, and the program computes on the processor instead.
+//
+// Lists the planner keeps on the device live in the GPU's own memory here, unlike on Linux, so
+// the planner copies them with `upload`, `download`, and `move`. Losing a list the device holds
+// would lose the program's data, so a copy back that fails stops the program with an error.
+//
+// It reaches `nvcuda.dll` and raw memory through `gpu_sys`, which only stone's own modules use.
+
+use os
+use time
+use gpu_sys
+
+// The kinds of refusal, as `gpu_nv` numbers them, the low four bits of a refusal code, whose
+// other bits hold a detail.
+const no_driver = 1
+const no_device = 2
+const no_code = 3
+const cuda_error = 4
+const too_many_values = 5
+
+// `CUDA_ERROR_OUT_OF_MEMORY`, and `CUDA_ERROR_NO_DEVICE` and `CUDA_ERROR_INVALID_DEVICE`,
+// which mean there is no GPU to use.
+const out_of_memory = 2
+const no_device_error = 100
+const invalid_device_error = 101
+
+// `CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR`, and the minor version's.
+const capability_major = 75
+const capability_minor = 76
+
+// The slots of the functions this module calls, in the order `functions` names them.
+const cu_init = 0
+const cu_device_get = 1
+const cu_attribute = 2
+const cu_retain = 3
+const cu_set_current = 4
+const cu_load = 5
+const cu_get_function = 6
+const cu_alloc = 7
+const cu_free = 8
+const cu_htod = 9
+const cu_dtoh = 10
+const cu_dtod = 11
+const cu_memset = 12
+const cu_launch = 13
+const cu_sync = 14
+
+// The size of the state block, and its fields past the function slots, 8 bytes each: the
+// setting of `STONE_GPU=require`, what launches give once the GPU was given up (0 while it is
+// not), the context, the module, the GPU's capability (major times 256 plus minor), the table
+// of kernels, the arena of GPU memory a launch copies lists into and its size, the GPU's flag a
+// dividing kernel sets, and room for what a call gives back.
+const block_size = 0x1000
+const at_require = 0x80
+const at_failed = 0x88
+const at_context = 0x90
+const at_module = 0x98
+const at_sm = 0xA0
+const at_kernels = 0xA8
+const at_arena = 0xB0
+const at_arena_size = 0xB8
+const at_flag = 0xC0
+const at_out = 0xC8
+
+// Where a kernel's name is written, and where a launch keeps each parameter's value and the
+// address of each value, which `cuLaunchKernel` takes.
+const at_name = 0x100
+const at_values = 0x200
+const at_pointers = 0x400
+
+// The version of the image's layout this module reads, and the sizes of a kernel's shape and a
+// device's entry in it.
+const image_version = 4
+const shape_size = 48
+const device_size = 48
+
+// The number of threads per block, and the most blocks a launch has; a grid-stride loop covers
+// the elements past them.
+const block = 256
+const max_blocks = 65535
+
+// The most parameters a kernel may take.
+const max_params = 64
+
+// What a byte of a list kept in the GPU's own memory costs a kernel, in femtoseconds: about
+// 100 GB/s, what a small GPU's memory carries.
+const vram_byte = 10
+
+// A time too long to count.
+const never = 0x7FFFFFFFFFFFFFFF
+
+////////////////////////////////////////////////////////////////
+// helpers
+////////////////////////////////////////////////////////////////
+
+// Rounds `v` up to a multiple of `to`, a power of two.
+fn align(v: int, to: int) -> int:
+    ret (v + to - 1) & ~(to - 1)
+
+// Returns the field at offset `at` of the state block `s`.
+fn field(s: int, at: int) -> int:
+    ret gpu_sys.peek64(s + at)
+
+// Sets the field at offset `at` of the state block `s` to `v`.
+fn keep(s: int, at: int, v: int):
+    gpu_sys.poke64(s + at, v)
+
+// Writes the ASCII `text` and a 0 after it at `at`, as C reads a name.
+fn put_text(at: int, text: str):
+    word = 0
+    i = 0
+    for b in text.bytes():
+        word = word | (b << (8 * (i % 8)))
+        i += 1
+        if i % 8 == 0:
+            gpu_sys.poke64(at + i - 8, word)
+            word = 0
+    gpu_sys.poke64(at + i - i % 8, word)
+
+// Returns the refusal code of `kind` with `detail`.
+fn refusal(kind: int, detail: int) -> int:
+    ret kind + 16 * detail
+
+// Returns `seconds` in femtoseconds, or `never` for a time too long to count.
+fn femtoseconds(seconds: float) -> int:
+    ret int(seconds * 1e15).unwrap_or(never)
+
+// The names of the functions this module calls, in the order of their slots.
+fn functions() -> list[str]:
+    ret ["cuInit", "cuDeviceGet", "cuDeviceGetAttribute", "cuDevicePrimaryCtxRetain", "cuCtxSetCurrent", "cuModuleLoadData", "cuModuleGetFunction", "cuMemAlloc_v2", "cuMemFree_v2", "cuMemcpyHtoD_v2", "cuMemcpyDtoH_v2", "cuMemcpyDtoD_v2", "cuMemsetD8_v2", "cuLaunchKernel", "cuCtxSynchronize"]
+
+// Calls the CUDA function of slot `function` of the state block `s` with `args`, giving an
+// error with its result unless that is `CUDA_SUCCESS`.
+fn cuda(s: int, function: int, args: list[int]) -> result[int, int]:
+    code = gpu_sys.call(field(s, 8 * function), args) & 0xFFFFFFFF
+    if code == no_device_error or code == invalid_device_error:
+        ret err(refusal(no_device, 0))
+    if code != 0:
+        ret err(refusal(cuda_error, code))
+    ret ok(0)
+
+// Returns `bytes` bytes of the GPU's memory.
+fn device_memory(s: int, bytes: int) -> result[int, int]:
+    cuda(s, cu_alloc, [s + at_out, bytes])?
+    ret ok(gpu_sys.peek64(s + at_out))
+
+// Returns where the image's shapes start.
+fn shapes_at(image: int) -> int:
+    ret image + align(32 + 4 * gpu_sys.peek32(image + 16), 8)
+
+////////////////////////////////////////////////////////////////
+// starting
+////////////////////////////////////////////////////////////////
+
+// Returns what a launch gives once the GPU gave up with `state`: minus the refusal code under
+// `STONE_GPU=require`, else 0, so the processor computes instead.
+pub fn refused(state: int) -> int:
+    m = -state
+    if m % 2 == 1:
+        ret -(m / 2)
+    ret 0
+
+// Returns the code in the image that a GPU of compute capability `major`.`minor` loads: the
+// newest cubin of its major version that is not newer than it, else the newest PTX that is not
+// newer than it, which the driver compiles. Code for a specific GPU (`sm_90a`) loads only on
+// exactly that one. Gives 0 when there is none.
+fn pick_module(major: int, minor: int) -> int:
+    image = gpu_sys.image()
+    if gpu_sys.peek64(image) != 0x555047454E4F5453 or gpu_sys.peek32(image + 8) != image_version:
+        ret 0
+    gpu = major * 10 + minor
+    devices = shapes_at(image) + shape_size * gpu_sys.peek32(image + 20)
+    count = gpu_sys.peek32(image + 12)
+    // the cubin's offset and size are at 16 and 24 of an entry, the PTX's at 32 and 40
+    for at in [16, 32]:
+        best = -1
+        best_key = -1
+        for i in range(count):
+            d = devices + device_size * i
+            sm = gpu_sys.peek32(d)
+            specific = gpu_sys.peek32(d + 4)
+            fits = sm <= gpu and gpu_sys.peek64(d + at + 8) != 0 and (specific == 0 or sm == gpu)
+            if at == 16:
+                fits = fits and sm / 10 == major
+            if fits and sm * 2 + specific > best_key:
+                best = d
+                best_key = sm * 2 + specific
+        if best >= 0:
+            ret image + gpu_sys.peek64(best + at)
+    ret 0
+
+// Loads `nvcuda.dll` and finds every function this module calls.
+fn find_functions(s: int) -> result[int, int]:
+    library = gpu_sys.nvcuda()
+    if library == 0:
+        ret err(refusal(no_driver, 0))
+    i = 0
+    for name in functions():
+        f = gpu_sys.symbol(library, name)
+        if f == 0:
+            ret err(refusal(no_driver, 0))
+        keep(s, 8 * i, f)
+        i += 1
+    ret ok(0)
+
+// Makes the first GPU's primary context current, loads the image's code for it, and finds every
+// kernel and the flag a dividing kernel sets.
+fn open_all(s: int) -> result[int, int]:
+    find_functions(s)?
+    out = s + at_out
+    cuda(s, cu_init, [0])?
+    cuda(s, cu_device_get, [out, 0])?
+    device = gpu_sys.peek32(out)
+    cuda(s, cu_attribute, [out, capability_major, device])?
+    major = gpu_sys.peek32(out)
+    cuda(s, cu_attribute, [out, capability_minor, device])?
+    minor = gpu_sys.peek32(out)
+    keep(s, at_sm, major * 256 + minor)
+    cuda(s, cu_retain, [out, device])?
+    keep(s, at_context, gpu_sys.peek64(out))
+    cuda(s, cu_set_current, [field(s, at_context)])?
+    code = pick_module(major, minor)
+    if code == 0:
+        ret err(refusal(no_code, major * 256 + minor))
+    cuda(s, cu_load, [out, code])?
+    keep(s, at_module, gpu_sys.peek64(out))
+    kernels = gpu_sys.peek32(gpu_sys.image() + 20)
+    table = gpu_sys.mmap(0, align(8 * kernels.max(1), 0x1000), 3, 0x22, -1, 0)
+    if table < 0:
+        ret err(refusal(cuda_error, out_of_memory))
+    keep(s, at_kernels, table)
+    for k in range(kernels):
+        put_text(s + at_name, "stone_k{k}")
+        cuda(s, cu_get_function, [table + 8 * k, field(s, at_module), s + at_name])?
+    keep(s, at_flag, device_memory(s, 8)?)
+    ret ok(0)
+
+// Starts the GPU and returns the state word, which it also keeps: the address of the state
+// block when the GPU is ready, else minus twice the refusal code, plus 1 when `require` is 1
+// (`STONE_GPU=require`).
+pub fn open(require: int) -> int:
+    state = opened(require)
+    gpu_sys.set_state(state)
+    ret state
+
+// Starts the GPU as `open` does, without keeping the state word.
+fn opened(require: int) -> int:
+    s = gpu_sys.mmap(0, block_size, 3, 0x22, -1, 0)
+    if s < 0:
+        ret -(refusal(cuda_error, out_of_memory) * 2 + require)
+    keep(s, at_require, require)
+    match open_all(s):
+        case ok(_):
+            ret s
+        case err(code):
+            ret -(code * 2 + require)
+
+// Gives the GPU up for good after `code` went wrong, and returns what a launch gives. The state
+// block stays, so lists the device holds can still come back.
+pub fn give_up(s: int, code: int) -> int:
+    failed = -(code * 2 + field(s, at_require))
+    keep(s, at_failed, failed)
+    ret refused(failed)
+
+// Returns whether the GPU was given up, so no launch is worth a call.
+pub fn gave_up() -> bool:
+    s = gpu_sys.state()
+    ret s <= 0 or field(s, at_failed) != 0
+
+// Writes the parameters of a launch of a kernel that takes `count`, every one 0.
+fn zero_params(s: int, count: int):
+    for i in range(count):
+        gpu_sys.poke64(s + at_values + 8 * i, 0)
+        gpu_sys.poke64(s + at_pointers + 8 * i, s + at_values + 8 * i)
+
+// Measures what reaching the GPU of the state block `s` costs, in femtoseconds: a launch that
+// does nothing (the first kernel over no elements) and waiting for it, the least of three, and
+// the time per byte of copying a list to the GPU and back.
+pub fn probe(s: int) -> result[tuple[int, int, int], int]:
+    zero_params(s, gpu_sys.peek32(shapes_at(gpu_sys.image())).min(max_params))
+    function = gpu_sys.peek64(field(s, at_kernels))
+    latency = never
+    for _ in range(3):
+        started = time.clock()
+        cuda(s, cu_launch, [function, 1, 1, 1, block, 1, 1, 0, 0, s + at_pointers, 0])?
+        cuda(s, cu_sync, [])?
+        latency = latency.min(femtoseconds(time.clock() - started))
+    size = 0x400000
+    host = gpu_sys.mmap(0, size, 3, 0x22, -1, 0)
+    if host < 0:
+        ret err(refusal(cuda_error, out_of_memory))
+    device = arena(s, size)?
+    // the first copy touches the memory, so the second is the one timed
+    cuda(s, cu_htod, [device, host, size])?
+    started = time.clock()
+    cuda(s, cu_htod, [device, host, size])?
+    up = femtoseconds(time.clock() - started) / size
+    started = time.clock()
+    cuda(s, cu_dtoh, [host, device, size])?
+    down = femtoseconds(time.clock() - started) / size
+    gpu_sys.munmap(host, size)
+    ret ok((latency, up.max(1), down.max(1)))
+
+////////////////////////////////////////////////////////////////
+// launching
+////////////////////////////////////////////////////////////////
+
+// Returns GPU memory of at least `size` bytes for a launch's lists, reusing the last launch's.
+fn arena(s: int, size: int) -> result[int, int]:
+    if size <= field(s, at_arena_size):
+        ret ok(field(s, at_arena))
+    grown = align(size.max(2 * field(s, at_arena_size)), 0x10000)
+    at = device_memory(s, grown)?
+    if field(s, at_arena_size) > 0:
+        cuda(s, cu_free, [field(s, at_arena)])?
+    keep(s, at_arena, at)
+    keep(s, at_arena_size, grown)
+    ret ok(at)
+
+// Runs the kernel of record `record` over `args` (the result's elements, the length, then the
+// kernel's values, a list by its elements' address), except that each list whose bit is set in
+// `placed` is already in the GPU's memory (from `alloc_device`), where the kernel reads it or,
+// for the result, writes it. Gives 1 when the GPU computed the result, 0 when the processor
+// should, or a refusal's negative under `STONE_GPU=require`, and an error when the GPU must be
+// given up.
+fn run_placed(s: int, record: int, args: list[int], placed: int) -> result[int, int]:
+    if args.len() < 2 or args[1] <= 0:
+        ret ok(0)
+    image = gpu_sys.image()
+    k = gpu_sys.peek32(image + 32 + 4 * record)
+    shape = shapes_at(image) + shape_size * k
+    count = gpu_sys.peek32(shape)
+    fails = gpu_sys.peek32(shape + 4) & 1
+    lists = gpu_sys.peek64(shape + 8)
+    if count > max_params:
+        if field(s, at_require) == 1:
+            ret ok(-refusal(too_many_values, count))
+        ret ok(0)
+    if args.len() + fails != count or lists & 1 == 0:
+        ret ok(0)
+    n = args[1]
+    bytes = n * 8
+    slot = align(bytes, 256)
+    total = 0
+    for i in range(args.len()):
+        if (lists >> i) & 1 == 1 and (placed >> i) & 1 == 0:
+            total += slot
+    at = arena(s, total)?
+    out = at
+    for i in range(args.len()):
+        v = args[i]
+        if (lists >> i) & 1 == 1 and (placed >> i) & 1 == 0:
+            // the kernel writes every element of the result, so only operands are copied in
+            if i > 0:
+                cuda(s, cu_htod, [at, v, bytes])?
+            v = at
+            at += slot
+        gpu_sys.poke64(s + at_values + 8 * i, v)
+        gpu_sys.poke64(s + at_pointers + 8 * i, s + at_values + 8 * i)
+    flag = field(s, at_flag)
+    if fails == 1:
+        cuda(s, cu_memset, [flag, 0, 8])?
+        last = args.len()
+        gpu_sys.poke64(s + at_values + 8 * last, flag)
+        gpu_sys.poke64(s + at_pointers + 8 * last, s + at_values + 8 * last)
+    grid = ((n + block - 1) / block).min(max_blocks)
+    function = gpu_sys.peek64(field(s, at_kernels) + 8 * k)
+    cuda(s, cu_launch, [function, grid, 1, 1, block, 1, 1, 0, 0, s + at_pointers, 0])?
+    cuda(s, cu_sync, [])?
+    if fails == 1:
+        cuda(s, cu_dtoh, [s + at_out, flag, 8])?
+        if gpu_sys.peek64(s + at_out) != 0:
+            ret ok(0)
+    if placed & 1 == 0:
+        cuda(s, cu_dtoh, [args[0], out, bytes])?
+    ret ok(1)
+
+// Runs the kernel of record `record` over `args` on the GPU, once `open` started it, with the
+// lists whose bits are set in `placed` already in `alloc_device`'s memory. Gives 1 when the GPU
+// computed the result, 0 when the processor should, or `-(kind + 16 * detail)` when
+// `STONE_GPU=require` refuses to compute on the processor.
+pub fn launch_placed(record: int, args: list[int], placed: int) -> int:
+    s = gpu_sys.state()
+    if s <= 0:
+        ret refused(s)
+    if field(s, at_failed) != 0:
+        ret refused(field(s, at_failed))
+    match run_placed(s, record, args, placed):
+        case ok(v):
+            ret v
+        case err(code):
+            ret give_up(s, code)
+
+////////////////////////////////////////////////////////////////
+// lists kept on the device
+////////////////////////////////////////////////////////////////
+
+// Returns the address of `bytes` bytes of the GPU's own memory, which the program keeps until
+// it ends, or -1.
+pub fn alloc_device(bytes: int) -> int:
+    if gave_up():
+        ret -1
+    match device_memory(gpu_sys.state(), bytes):
+        case ok(at):
+            ret at
+        case err(_):
+            ret -1
+
+// Returns what a byte of a list kept in `alloc_device`'s memory costs a kernel that reads or
+// writes it, in femtoseconds.
+pub fn device_byte() -> int:
+    ret vram_byte
+
+// Copies `bytes` bytes of the processor's memory at `host` to the GPU's at `device`, giving
+// whether it could. The processor's copy is untouched either way.
+pub fn upload(device: int, host: int, bytes: int) -> bool:
+    s = gpu_sys.state()
+    if s <= 0:
+        ret false
+    match cuda(s, cu_htod, [device, host, bytes]):
+        case ok(_):
+            ret true
+        case err(_):
+            ret false
+
+// Stops the program, whose lists the GPU held when a copy failed with the refusal `code`.
+fn lost(code: int):
+    eprint("error: the GPU failed while it held the program's lists (CUDA error {code / 16})")
+    os.exit(1)
+
+// Copies `bytes` bytes of the GPU's memory at `device` to the processor's at `host`, stopping
+// the program if it cannot, since the GPU holds the only current copy.
+pub fn download(host: int, device: int, bytes: int):
+    s = gpu_sys.state()
+    if s <= 0:
+        lost(refusal(cuda_error, 0))
+        ret
+    match cuda(s, cu_dtoh, [host, device, bytes]):
+        case ok(_):
+            ret
+        case err(code):
+            lost(code)
+
+// Copies `bytes` bytes of the GPU's memory from `from` to `to`, stopping the program if it
+// cannot, as `download` does.
+pub fn move(to: int, from: int, bytes: int):
+    s = gpu_sys.state()
+    if s <= 0:
+        lost(refusal(cuda_error, 0))
+        ret
+    match cuda(s, cu_dtod, [to, from, bytes]):
+        case ok(_):
+            ret
+        case err(code):
+            lost(code)

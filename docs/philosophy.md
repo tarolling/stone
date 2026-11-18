@@ -303,10 +303,12 @@ The same arithmetic on lists is the first code stone writes for GPUs: with `--gp
 `stone build` turns each such expression into a kernel, in PTX for NVIDIA GPUs, that computes
 every element exactly as the processor does, rounding each float operation on its own and
 flagging a zero divisor for the program to report. No keyword marks the code for a GPU, since the
-compiler finds it. An x86-64 Windows program launches the kernels through NVIDIA's driver,
-which it loads only when it runs, so the same executable computes on the processor on a machine
-without one; `STONE_GPU=off` keeps it there, and `STONE_GPU=require` makes it an error not to
-use the GPU. A Linux program, which uses no C library and so cannot load libcuda, speaks to
+compiler finds it. An x86-64 Windows program launches the kernels through NVIDIA's CUDA driver
+interface, `nvcuda.dll`, which it loads only when it runs, from a driver written in stone
+(`gpu_cuda`) over three native primitives (load the DLL, find a function, call it), so the same
+executable computes on the processor on a machine without one; `STONE_GPU=off` keeps it there,
+and `STONE_GPU=require` makes it an error not to use the GPU. A Linux program, which uses no C
+library and so cannot load libcuda, speaks to
 NVIDIA's kernel driver itself, through ioctls on `/dev/nvidia*`, from a driver written in stone
 (`gpu_nv`) over a few native primitives, and runs the machine code `ptxas` made at build time;
 so far it knows driver version 595 and Ampere and Ada GPUs, and computes on the processor
@@ -315,10 +317,12 @@ it saves outweighs reaching it: it records each kernel's cost per element on eit
 program measures its GPU's latency and bandwidth when it starts it, and a list too short to
 repay a launch stays on the processor for the price of one compare. Lists stay on the GPU
 through runs of statements and loops that only compute on them, coming back once, where the
-processor next reads them, which the compiler finds by the same liveness that moves values. On
-Linux those lists live in processor memory the GPU reads so far, not in its own; putting them
-there, the same decisions on Windows, other drivers and generations, and AMD GPUs are future
-work.
+processor next reads them, which the compiler finds by the same liveness that moves values. Both
+systems share one planner, written in stone (`gpu_plan`), for these decisions. On Windows those
+lists live in the GPU's own memory; on Linux they live in processor memory the GPU reads so far,
+not in its own. Putting them there on Linux, other drivers and generations, a cheaper start on
+Windows (whose driver takes a fifth of a second to start, which a program pays the first time it
+reaches arithmetic on a list), and AMD GPUs are future work.
 Vector code beyond arithmetic on lists (searching strings, comparing lists, summing them),
 splitting a value's live range around calls, and removing reference counts it can prove
 redundant beyond moves at last use are future work.

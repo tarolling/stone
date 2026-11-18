@@ -97,12 +97,12 @@ pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, S
 }
 
 /// Lowers `module` as [`lower_for`] does and, if `gpu_launch` launches, has each piece of arithmetic on
-/// lists that a GPU could compute ([`Program::device_kernels`]) first call `stone.gpu_launch`,
-/// which gives 1 if the GPU computed the result and 0 if the processor must, as it does with
-/// the loop that follows.
+/// lists that a GPU could compute ([`Program::device_kernels`]) first call the planner's
+/// `gpu_plan.launch`, which gives 1 if the GPU computed the result and 0 if the processor must,
+/// as it does with the loop that follows.
 ///
-/// For example, `c = a * 2.0 + b` then lowers to `v9 = call stone.gpu_launch(0, v8)`, where
-/// `v8` is the list of the kernel's arguments, and a branch on `v9` that skips the loop.
+/// For example, `c = a * 2.0 + b` then lowers to `v9 = call fn.gpu_plan.launch(0, v8, 0)`,
+/// where `v8` is the list of the kernel's arguments, and a branch on `v9` that skips the loop.
 ///
 /// With `tests`, the linked names of test functions such as `test.4.1`, it lowers a build for
 /// `stone test` instead: `main` runs none of the top-level statements, but calls the one test
@@ -4756,8 +4756,9 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    /// Returns whether `test` is true, if it is `gui_sys.on_windows()` or `net_sys.on_windows()`,
-    /// which are constants for the system the program is lowered for, or `gpu_sys.simulated()`,
+    /// Returns whether `test` is true, if it is `gui_sys.on_windows()`, `net_sys.on_windows()`,
+    /// or `gpu_sys.on_windows()`, which are constants for the system the program is lowered for,
+    /// or `gpu_sys.simulated()`,
     /// a constant for the build, or `not` of one.
     ///
     /// For example, `not gui_sys.on_windows()` is `Some(false)` for Windows.
@@ -4765,7 +4766,10 @@ impl<'a> Lowerer<'a> {
         match &test.kind {
             ExprKind::Call { func, args, .. } if args.is_empty() => match &func.kind {
                 ExprKind::Name { id, .. }
-                    if id == "gui_sys.on_windows" || id == "net_sys.on_windows" =>
+                    if matches!(
+                        id.as_str(),
+                        "gui_sys.on_windows" | "net_sys.on_windows" | "gpu_sys.on_windows"
+                    ) =>
                 {
                     Some(self.context.os == Os::Windows)
                 }
@@ -5496,13 +5500,15 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Tries kernel number `record`, which computes `kernel` for `len` elements into the list
-    /// `result`, on a GPU: calls `gpu_plan.launch` on Linux (`stone.gpu_launch` elsewhere) with
-    /// the kernel's number and a list of its arguments (the result's and the lists' element
-    /// addresses and the length and numbers, in the order the kernel takes them), then branches.
-    /// Control continues in a new block, where the processor computes the elements, if the call
-    /// gives 0, and goes to the block it returns, which the caller makes the end of that
-    /// computation, if it gives 1. On Linux a list shorter than the shortest the planner found
-    /// worth a launch (`gpu_min_len`) goes to the processor without the call.
+    /// `result`, on a GPU: calls `gpu_plan.launch` (stone code, which drives the GPU through
+    /// `gpu_nv` on Linux and `gpu_cuda` on Windows) with the kernel's number, a list of its
+    /// arguments (the result's and the lists' element addresses and the length and numbers, in
+    /// the order the kernel takes them), and its residency in a region, then branches. Control
+    /// continues in a new block, where the processor computes the elements, if the call gives 0,
+    /// goes to the block it returns, which the caller makes the end of that computation, if it
+    /// gives 1, and fails at the arithmetic if it gives a refusal. Outside a region, a list
+    /// shorter than the shortest the planner found worth a launch (`gpu_min_len`) goes to the
+    /// processor without the call.
     fn launch(
         &mut self,
         record: usize,
@@ -5511,10 +5517,9 @@ impl<'a> Lowerer<'a> {
         result: VReg,
         len: VReg,
     ) -> BlockId {
-        let linux = self.context.os == Os::Linux;
         let processor = self.new_block();
         // in a region a list may be newer on the device, so only the runtime may decide
-        if linux && self.region.is_none() {
+        if self.region.is_none() {
             let (shortest, tried) = (self.fresh(), self.new_block());
             self.push(Inst::GpuMinLen {
                 dst: shortest,
@@ -5569,44 +5574,36 @@ impl<'a> Lowerer<'a> {
             .collect();
         let residency = self.residency(&lists);
         let ran = self.fresh();
-        let callee = match linux {
-            // the planner and the driver are stone code, linked into every build with GPUs
-            true => Callee::Helper(function_label(&format!(
-                "{}.launch",
-                crate::stdlib::gpu::PLAN_MODULE
-            ))),
-            false => Callee::Runtime("stone.gpu_launch"),
-        };
+        // the planner and the driver are stone code, linked into every build with GPUs
+        let callee = Callee::Helper(function_label(&format!(
+            "{}.launch",
+            crate::stdlib::gpu::PLAN_MODULE
+        )));
         self.push(Inst::Call {
             dsts: vec![ran],
             callee,
-            args: match linux {
-                true => vec![
-                    Operand::Imm(record as i64),
-                    Operand::Reg(list),
-                    Operand::Imm(residency),
-                ],
-                false => vec![Operand::Imm(record as i64), Operand::Reg(list)],
-            },
+            args: vec![
+                Operand::Imm(record as i64),
+                Operand::Reg(list),
+                Operand::Imm(residency),
+            ],
         });
         self.push(Inst::Release {
             src: Operand::Reg(list),
             kind: RcKind::List,
         });
-        if linux {
-            let (refused, answered) = (self.new_block(), self.new_block());
-            self.terminate(Terminator::CmpBranch {
-                cond: Cond::Lt,
-                float: false,
-                lhs: Operand::Reg(ran),
-                rhs: Operand::Imm(0),
-                then: refused,
-                otherwise: answered,
-            });
-            self.start(refused);
-            self.refuse(ran);
-            self.start(answered);
-        }
+        let (refused, answered) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(ran),
+            rhs: Operand::Imm(0),
+            then: refused,
+            otherwise: answered,
+        });
+        self.start(refused);
+        self.refuse(ran);
+        self.start(answered);
         let done = self.new_block();
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Ne,
@@ -5647,11 +5644,25 @@ impl<'a> Lowerer<'a> {
             rhs: Operand::Imm(4),
         });
         use crate::codegen::gpu;
+        // Windows reaches the GPU through nvcuda.dll, whose errors are CUDA's
+        let windows = self.context.os == Os::Windows;
         let kinds = [
-            (1, gpu::NO_LINUX_DRIVER),
+            (
+                1,
+                match windows {
+                    true => gpu::NO_DRIVER,
+                    false => gpu::NO_LINUX_DRIVER,
+                },
+            ),
             (2, gpu::NO_DEVICE),
             (3, gpu::NO_CODE),
-            (4, gpu::DRIVER_ERROR),
+            (
+                4,
+                match windows {
+                    true => gpu::CUDA_ERROR,
+                    false => gpu::DRIVER_ERROR,
+                },
+            ),
             (5, gpu::TOO_MANY_VALUES),
             (6, gpu::TIMED_OUT),
         ];
@@ -7913,7 +7924,7 @@ impl<'a> Lowerer<'a> {
                     }),
                 )
             }
-            "gui_sys.on_windows" | "net_sys.on_windows" => {
+            "gui_sys.on_windows" | "net_sys.on_windows" | "gpu_sys.on_windows" => {
                 let windows = self.context.os == Os::Windows;
                 Ok(self.finish(Operand::Imm(windows as i64), into))
             }

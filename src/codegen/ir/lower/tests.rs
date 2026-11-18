@@ -1936,23 +1936,76 @@ fn a_variable_read_twice_is_one_list_of_its_kernel() {
 /// Links, checks, and lowers the program `source` for Linux, with or without launches of its
 /// kernels on a GPU, returning the IR dump.
 fn dump_launching(source: &str, gpu_launch: bool) -> String {
+    dump_launching_for(source, gpu_launch, crate::codegen::Os::Linux, &[])
+}
+
+/// Links, checks, and lowers the program `source` for `os` as [`dump_launching`] does, linking
+/// the modules written in stone named in `required` too, as `stone build --gpu` links the
+/// planner.
+fn dump_launching_for(
+    source: &str,
+    gpu_launch: bool,
+    os: crate::codegen::Os,
+    required: &[&str],
+) -> String {
     let gpu_launch = match gpu_launch {
         true => crate::codegen::gpu::Launch::Device,
         false => crate::codegen::gpu::Launch::Never,
     };
     let sources = crate::project::MapSources::default();
-    let (_, module) = crate::driver::load(std::path::Path::new("main.stn"), source, &sources);
+    let (_, module) =
+        crate::driver::load_with(std::path::Path::new("main.stn"), source, &sources, required);
     let module = module.unwrap().module;
     let analysis = TypeChecker::new().analyze(&module);
-    let program = lower_with(
-        &module,
-        &analysis,
-        crate::codegen::Os::Linux,
-        gpu_launch,
-        None,
-    )
-    .unwrap();
+    let program = lower_with(&module, &analysis, os, gpu_launch, None).unwrap();
     program.functions.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn a_windows_program_for_a_gpu_goes_through_the_planner_as_a_linux_one_does() {
+    use crate::codegen::Os;
+    let source = "a = [1.0, 2.0]\nb = [3.0, 4.0]\nprint(a * 2.0 + b)\n";
+    let windows = dump_launching_for(source, true, Os::Windows, &[]);
+    assert_eq!(
+        windows.matches("fn.gpu_plan.launch(0, ").count(),
+        1,
+        "{windows}"
+    );
+    assert_eq!(windows.matches("= gpu_min_len 0\n").count(), 1, "{windows}");
+    assert!(!windows.contains("stone.gpu_launch"), "{windows}");
+    // a refusal names what Windows lacks: nvcuda.dll, or the CUDA error
+    assert!(windows.contains("nvcuda.dll is missing"), "{windows}");
+    assert!(windows.contains("CUDA error"), "{windows}");
+    assert!(!windows.contains("NVIDIA's driver is missing"), "{windows}");
+    let linux = dump_launching_for(source, true, Os::Linux, &[]);
+    assert!(linux.contains("NVIDIA's driver is missing"), "{linux}");
+    assert!(!linux.contains("nvcuda.dll"), "{linux}");
+}
+
+#[test]
+fn a_windows_chain_of_arithmetic_keeps_its_lists_on_the_gpu() {
+    let source = "fn f(x: list[float]) -> list[float]:\n    t = x * 2.0\n    u = t + 1.0\n    \
+                  ret u\nprint(f([1.0]))\n";
+    let with = dump_launching_for(source, true, crate::codegen::Os::Windows, &[]);
+    assert_eq!(
+        with.matches("call fn.gpu_plan.begin(0, 2, ").count(),
+        1,
+        "{with}"
+    );
+    assert_eq!(with.matches("call fn.gpu_plan.end(").count(), 1, "{with}");
+}
+
+#[test]
+fn each_system_lowers_only_its_own_gpu_driver() {
+    use crate::codegen::Os;
+    use crate::stdlib::gpu::PLAN_MODULE;
+    let source = "a = [1.0, 2.0]\nprint(a * 2.0)\n";
+    let windows = dump_launching_for(source, true, Os::Windows, &[PLAN_MODULE]);
+    assert!(windows.contains("fn gpu_cuda.launch_placed("), "{windows}");
+    assert!(!windows.contains("gpu_nv."), "gpu_nv in {windows}");
+    let linux = dump_launching_for(source, true, Os::Linux, &[PLAN_MODULE]);
+    assert!(linux.contains("fn gpu_nv.launch_placed("), "{linux}");
+    assert!(!linux.contains("gpu_cuda."), "gpu_cuda in {linux}");
 }
 
 #[test]

@@ -729,20 +729,6 @@ impl X64Generator {
         if !fs.is_empty() {
             fs::fs_runtime(self, &fs);
         }
-        if self.ctx.uses(&["stone.gpu_launch"]) {
-            if self.target.os == Os::Windows {
-                let refusals = gpu_windows::Refusals {
-                    driver: self.ctx.fail_label(crate::codegen::gpu::NO_DRIVER),
-                    device: self.ctx.fail_label(crate::codegen::gpu::NO_DEVICE),
-                    code: self.ctx.fail_label(crate::codegen::gpu::NO_CODE),
-                    cuda: self.ctx.fail_label(crate::codegen::gpu::CUDA_ERROR),
-                    too_many: self.ctx.fail_label(crate::codegen::gpu::TOO_MANY_VALUES),
-                };
-                gpu_windows::gpu_runtime(self, &refusals);
-            } else {
-                gpu::gpu_runtime(self);
-            }
-        }
         let gpu = self.ctx.module_routines("stone.gpu_");
         if !gpu.is_empty() {
             let records = self.ctx.program.device_kernels.len();

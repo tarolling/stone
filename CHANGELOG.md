@@ -28,6 +28,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   them; a zero divisor on the way still reports the interpreter's element and position.
   `STONE_GPU_SIMULATE=1 stone build --gpu ...` builds a Linux program whose GPU is simulated on
   the processor, for testing this without one.
+- Windows executables built with `--gpu` make the same decisions as Linux ones: they measure
+  the GPU, keep short lists on the processor, and keep lists in the GPU's own memory across
+  statements and loops that only compute on them. Their driver is now written in stone over
+  `nvcuda.dll`, and has run on a GPU (a Turing `sm_75`). `STONE_GPU_SIMULATE=1` works for
+  Windows builds too.
 
 - `STONE_VERIFY_FACTS=1 stone build` keeps every check an optimization proved never fails and
   removed, as a check that stops the program with `compiler bug: <pass> removed a check that

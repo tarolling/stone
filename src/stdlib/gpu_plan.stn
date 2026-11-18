@@ -24,6 +24,7 @@
 use os
 use gpu_sys
 use gpu_nv
+use gpu_cuda
 use gpu_sim
 
 // The settings of `STONE_GPU`.
@@ -186,24 +187,64 @@ fn start_device(mode: int):
     require = 0
     if mode == mode_require:
         require = 1
-    state = gpu_nv.open(require)
+    state = driver_open(require)
     if state < 0:
-        stop(gpu_nv.refused(state))
+        stop(driver_refused(state))
         ret
-    match gpu_nv.probe(state):
+    match driver_probe(state):
         case ok(measured):
             latency, up, down = measured
             if not plausible(latency, up, down):
-                stop(gpu_nv.give_up(state, probe_failed))
+                stop(driver_give_up(state, probe_failed))
                 ret
             keep(at_latency, latency)
             keep(at_up, up)
             keep(at_down, down)
         case err(code):
-            stop(gpu_nv.give_up(state, code))
+            stop(driver_give_up(state, code))
             ret
     keep(at_started, 1)
     fill(mode)
+
+////////////////////////////////////////////////////////////////
+// the driver: `gpu_cuda` on Windows and `gpu_nv` elsewhere, picked by a constant, so a program
+// lowers only its own system's
+////////////////////////////////////////////////////////////////
+
+// Starts the GPU, as `gpu_nv.open` describes.
+fn driver_open(require: int) -> int:
+    if gpu_sys.on_windows():
+        ret gpu_cuda.open(require)
+    else:
+        ret gpu_nv.open(require)
+
+// Returns what a launch gives once the driver gave up with `state`.
+fn driver_refused(state: int) -> int:
+    if gpu_sys.on_windows():
+        ret gpu_cuda.refused(state)
+    else:
+        ret gpu_nv.refused(state)
+
+// Measures the GPU the driver started with `state`.
+fn driver_probe(state: int) -> result[tuple[int, int, int], int]:
+    if gpu_sys.on_windows():
+        ret gpu_cuda.probe(state)
+    else:
+        ret gpu_nv.probe(state)
+
+// Gives the GPU up after `code` went wrong, and returns what a launch gives.
+fn driver_give_up(state: int, code: int) -> int:
+    if gpu_sys.on_windows():
+        ret gpu_cuda.give_up(state, code)
+    else:
+        ret gpu_nv.give_up(state, code)
+
+// Returns whether the driver gave the GPU up for the rest of the run.
+fn gave_up() -> bool:
+    if gpu_sys.on_windows():
+        ret gpu_cuda.gave_up()
+    else:
+        ret gpu_sys.state() < 0
 
 ////////////////////////////////////////////////////////////////
 // lists kept on the device
@@ -211,30 +252,62 @@ fn start_device(mode: int):
 
 // Returns the address of `bytes` bytes of the device's memory, or -1. Both the simulated
 // device's memory and the memory `gpu_nv` keeps lists in so far are the processor's, mapped
-// into the GPU, so the processor copies lists to and from them itself.
+// into the GPU, so the processor copies lists to and from them itself; `gpu_cuda` keeps them
+// in the GPU's own memory, which it copies.
 fn device_alloc(bytes: int) -> int:
     if gpu_sys.simulated():
         ret gpu_sim.alloc(bytes)
-    ret gpu_nv.alloc_device(bytes)
+    elif gpu_sys.on_windows():
+        ret gpu_cuda.alloc_device(bytes)
+    else:
+        ret gpu_nv.alloc_device(bytes)
 
-// Copies `bytes` bytes of the processor's memory at `host` to the device's at `device`.
-fn upload(device: int, host: int, bytes: int):
-    gpu_sys.copy(device, host, bytes)
+// Copies `bytes` bytes of the processor's memory at `host` to the device's at `device`, giving
+// whether it could. The processor's copy is untouched either way.
+fn upload(device: int, host: int, bytes: int) -> bool:
+    if gpu_sys.simulated():
+        gpu_sys.copy(device, host, bytes)
+    elif gpu_sys.on_windows():
+        ret gpu_cuda.upload(device, host, bytes)
+    else:
+        gpu_sys.copy(device, host, bytes)
+    ret true
 
 // Copies `bytes` bytes of the device's memory at `device` to the processor's at `host`.
 fn download(host: int, device: int, bytes: int):
-    gpu_sys.copy(host, device, bytes)
+    if gpu_sys.simulated():
+        gpu_sys.copy(host, device, bytes)
+    elif gpu_sys.on_windows():
+        gpu_cuda.download(host, device, bytes)
+    else:
+        gpu_sys.copy(host, device, bytes)
 
 // Copies `bytes` bytes of the device's memory from `from` to `to`.
 fn move(to: int, from: int, bytes: int):
-    gpu_sys.copy(to, from, bytes)
+    if gpu_sys.simulated():
+        gpu_sys.copy(to, from, bytes)
+    elif gpu_sys.on_windows():
+        gpu_cuda.move(to, from, bytes)
+    else:
+        gpu_sys.copy(to, from, bytes)
 
 // Returns what a kernel pays per byte of a list kept on the device, in femtoseconds, beyond
 // what its shape says.
 fn device_byte() -> int:
     if gpu_sys.simulated():
         ret 0
-    ret gpu_nv.device_byte()
+    elif gpu_sys.on_windows():
+        ret gpu_cuda.device_byte()
+    else:
+        ret gpu_nv.device_byte()
+
+// Runs the kernel of record `record` over `args` on the device, with the lists whose bits are
+// set in `placed` already in its memory.
+fn driver_launch(record: int, args: list[int], placed: int) -> int:
+    if gpu_sys.on_windows():
+        ret gpu_cuda.launch_placed(record, args, placed)
+    else:
+        ret gpu_nv.launch_placed(record, args, placed)
 
 // Runs the kernel of record `record` over `args`, in which each list whose bit is set in
 // `placed` is in the device's memory, into the elements at `into` (there too if bit 0 is set).
@@ -246,8 +319,8 @@ fn run_into(record: int, args: list[int], into: int, placed: int) -> int:
     for v in args:
         given.append(v)
     given[0] = into
-    ran = gpu_nv.launch_placed(record, given, placed)
-    if gpu_sys.state() < 0:
+    ran = driver_launch(record, given, placed)
+    if gave_up():
         // the driver gave the GPU up, so no later list is worth a call
         stop(ran.min(0))
     ret ran
@@ -415,7 +488,8 @@ fn launch_kept(f: int, record: int, args: list[int], residency: int) -> int:
                 else:
                     state = gpu_sys.peek64(at + slot_state)
                     if state == empty or (state == clean and gpu_sys.peek64(at + slot_host) != v):
-                        upload(gpu_sys.peek64(at + slot_device), v, bytes)
+                        if not upload(gpu_sys.peek64(at + slot_device), v, bytes):
+                            ret 0
                         gpu_sys.poke64(at + slot_host, v)
                         gpu_sys.poke64(at + slot_bytes, bytes)
                         gpu_sys.poke64(at + slot_state, clean)
@@ -475,8 +549,8 @@ pub fn launch(record: int, args: list[int], residency: int) -> int:
         ret 0
     if gpu_sys.simulated():
         ret gpu_sim.launch(record, args)
-    ran = gpu_nv.launch(record, args)
-    if gpu_sys.state() < 0:
+    ran = driver_launch(record, args, 0)
+    if gave_up():
         // the driver gave the GPU up, so no later list is worth a call
         stop(ran.min(0))
     ret ran

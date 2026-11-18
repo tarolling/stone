@@ -1,25 +1,17 @@
-//! The runtime that runs a kernel on a GPU, on every system but Windows, which has its own in
-//! [`gpu_windows`](super::gpu_windows).
-//!
-//! `stone.gpu_launch` takes the number of a piece of arithmetic in `rdi`, as
-//! `Program::device_kernels` numbers them (the image at `stone.gpu_image` maps it to a kernel, see
-//! [`image`](crate::codegen::gpu::image)), and in `rsi` a list of ints holding what the kernel
-//! takes: the address of the result's elements, their count, then the address of each list's
-//! elements and the bits of each number the kernel's arithmetic names, left to right. It gives 1
-//! in `rax` if the GPU computed the result, and 0 if the processor must, which every caller then
-//! does.
-//!
-//! Linux programs reach no GPU yet, so it always gives 0.
-//!
-//! [`gpu_sys_runtime`] emits the routines behind the internal `gpu_sys` module, the thin native
-//! help that `gpu_nv.stn` drives an NVIDIA GPU through on Linux: raw system calls, reads and
-//! writes of memory the driver maps, and a slot in `.bss` for its state.
+//! The routines behind the internal `gpu_sys` module, the thin native help that the GPU drivers
+//! written in stone drive an NVIDIA GPU through: `gpu_nv.stn` on Linux, with raw system calls,
+//! and `gpu_cuda.stn` on Windows, through `nvcuda.dll` (whose routines are in
+//! [`gpu_windows`](super::gpu_windows)); plus reads and writes of raw memory, mappings, and slots
+//! in `.bss` for their state and the planner's.
 
-use crate::codegen::AssemblyGenerator;
+use super::system::{Sys, system_call};
+use crate::codegen::{AssemblyGenerator, Os};
 
 /// Emits the `gpu_sys` routines among `labels`, each taking its arguments as a System V call
 /// does and giving its result in `rax`. The system calls give a negative error number on failure,
-/// as Linux returns it.
+/// as Linux returns it; `mmap` and `munmap` go through [`system_call`], so they work on Windows
+/// too. The routines that reach `nvcuda.dll` exist only on Windows, and give 0 elsewhere, where
+/// nothing calls them.
 ///
 /// The table of each of the program's `records` shortest lists worth a launch comes with
 /// `stone.gpu_min_lengths_address`, and the planner's block with `stone.gpu_plan_address`.
@@ -44,7 +36,31 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], recor
             r#gen.emit(line);
         }
     }
+    let windows = r#gen.target().os == Os::Windows;
+    if windows {
+        super::gpu_windows::gpu_windows_runtime(r#gen, labels);
+    }
     for &label in labels {
+        if label == "stone.gpu_mmap" || label == "stone.gpu_munmap" {
+            r#gen.emit(&format!("{label}:"));
+            if label == "stone.gpu_mmap" {
+                // the fourth argument of a system call goes in r10
+                r#gen.emit("\tmov\tr10, rcx");
+                system_call(r#gen, Sys::Mmap);
+            } else {
+                system_call(r#gen, Sys::Munmap);
+            }
+            r#gen.emit("\tret");
+            continue;
+        }
+        if super::gpu_windows::ROUTINES.contains(&label) {
+            if !windows {
+                r#gen.emit(&format!("{label}:"));
+                r#gen.emit("\txor\teax, eax");
+                r#gen.emit("\tret");
+            }
+            continue;
+        }
         let body: &[&str] = match label {
             "stone.gpu_open" => &[
                 "\tmov\trsi, rdi",
@@ -56,9 +72,7 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], recor
             ],
             "stone.gpu_close" => &["\tmov\teax, 3", "\tsyscall"],
             "stone.gpu_ioctl" => &["\tmov\teax, 16", "\tsyscall"],
-            // the fourth argument of a system call goes in r10
-            "stone.gpu_mmap" => &["\tmov\tr10, rcx", "\tmov\teax, 9", "\tsyscall"],
-            "stone.gpu_munmap" => &["\tmov\teax, 11", "\tsyscall"],
+
             "stone.gpu_peek32" => &["\tmov\teax, DWORD PTR [rdi]"],
             // a float travels as its bits, in the same registers as an int
             "stone.gpu_peek64" | "stone.gpu_peek_float" => &["\tmov\trax, QWORD PTR [rdi]"],
@@ -81,28 +95,10 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], recor
     }
 }
 
-/// Emits `stone.gpu_launch`.
-pub fn gpu_runtime(r#gen: &mut dyn AssemblyGenerator) {
-    r#gen.emit("stone.gpu_launch:");
-    r#gen.emit("\txor\teax, eax");
-    r#gen.emit("\tret");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codegen::x64::X64Generator;
-
-    #[test]
-    fn a_launch_that_reaches_no_gpu_gives_zero() {
-        let mut generator = X64Generator::default();
-        gpu_runtime(&mut generator);
-        let text = &generator.output;
-        assert!(
-            text.contains("stone.gpu_launch:\n\txor\teax, eax\n\tret\n"),
-            "{text}"
-        );
-    }
 
     #[test]
     fn the_gpu_sys_routines_make_raw_system_calls() {
@@ -112,7 +108,7 @@ mod tests {
             .map(|(_, label)| *label)
             .filter(|label| label.starts_with("stone.gpu_"))
             .collect::<Vec<_>>();
-        assert_eq!(labels.len(), 18);
+        assert_eq!(labels.len(), 21);
         gpu_sys_runtime(&mut generator, &labels, 2);
         let text = &generator.output;
         for piece in [
@@ -132,6 +128,29 @@ mod tests {
         }
         // the built-in assembler encodes every line
         crate::codegen::asm::assemble(text, crate::codegen::Architecture::X64).unwrap();
+    }
+
+    #[test]
+    fn windows_maps_memory_through_its_shim_and_reaches_nvcuda() {
+        let mut generator = X64Generator::for_target(crate::codegen::Target::X64_WINDOWS);
+        let labels = ["stone.gpu_mmap", "stone.gpu_munmap", "stone.gpu_call"];
+        gpu_sys_runtime(&mut generator, &labels, 0);
+        let text = &generator.output;
+        assert!(
+            text.contains("stone.gpu_mmap:\n\tmov\tr10, rcx\n\tcall\tstone.sys_mmap\n\tret\n"),
+            "{text}"
+        );
+        assert!(text.contains("\tcall\tstone.sys_munmap\n"), "{text}");
+        assert!(text.contains(".Lgpu_call_go:\n\tcall\tr11\n"), "{text}");
+        // Linux never calls nvcuda.dll, so its routines there give 0
+        let mut generator = X64Generator::default();
+        gpu_sys_runtime(&mut generator, &labels, 0);
+        let text = &generator.output;
+        assert!(
+            text.contains("stone.gpu_call:\n\txor\teax, eax\n\tret\n"),
+            "{text}"
+        );
+        assert!(text.contains("\tmov\teax, 9\n\tsyscall\n"), "{text}");
     }
 
     #[test]

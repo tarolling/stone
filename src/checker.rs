@@ -10233,6 +10233,10 @@ impl Inference {
             | "gpu_sys.plan"
             | "gpu_sys.min_lengths"
             | "gpu_sys.simulated"
+            | "gpu_sys.on_windows"
+            | "gpu_sys.nvcuda"
+            | "gpu_sys.symbol"
+            | "gpu_sys.call"
             | "gpu_sys.peek_float"
             | "gpu_sys.poke_float" => {
                 let ints = |n: usize| vec![Ty::Int; n];
@@ -10245,7 +10249,9 @@ impl Inference {
                     "gpu_sys.peek32" | "gpu_sys.peek64" => (ints(1), Ty::Int),
                     "gpu_sys.copy" => (ints(3), Ty::Unit),
                     "gpu_sys.fence" => (vec![], Ty::Unit),
-                    "gpu_sys.simulated" => (vec![], Ty::Bool),
+                    "gpu_sys.simulated" | "gpu_sys.on_windows" => (vec![], Ty::Bool),
+                    "gpu_sys.symbol" => (vec![Ty::Int, Ty::Str], Ty::Int),
+                    "gpu_sys.call" => (vec![Ty::Int, Ty::List(Box::new(Ty::Int))], Ty::Int),
                     "gpu_sys.peek_float" => (ints(1), Ty::Float),
                     "gpu_sys.poke_float" => (vec![Ty::Int, Ty::Float], Ty::Unit),
                     _ => (vec![], Ty::Int),

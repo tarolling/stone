@@ -319,10 +319,12 @@ match net.listen(\"127.0.0.1\", 0):
     case err(e):
         print(e)
 ";
-    let (_, module) = crate::driver::load(
+    // with the planner, which `--gpu` builds link and which drives the GPU through nvcuda.dll
+    let (_, module) = crate::driver::load_with(
         std::path::Path::new("main.stn"),
         source,
         &crate::project::MapSources::default(),
+        &[crate::stdlib::gpu::PLAN_MODULE],
     );
     let module = module.unwrap().module;
     // built as `--gpu` builds, so the runtime launches the arithmetic on lists on a GPU

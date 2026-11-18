@@ -1,10 +1,3 @@
-//! The runtime that runs a kernel on a GPU, as [`x64::gpu`](crate::codegen::x64::gpu) does.
-//!
-//! `stone.gpu_launch` takes the number of a piece of arithmetic in `x0`, which the image at
-//! `stone.gpu_image` maps to a kernel, and the list of what it takes in `x1`,
-//! and gives 1 in `x0` if the GPU computed the result and 0 if the processor must. No GPU is
-//! reachable yet, so it always gives 0.
-//!
 //! [`gpu_sys_runtime`] emits the routines behind the internal `gpu_sys` module on Linux, as
 //! [`x64::gpu::gpu_sys_runtime`](crate::codegen::x64::gpu::gpu_sys_runtime) does.
 
@@ -84,6 +77,8 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], recor
                 "\tadrp\tx0, stone.gpu_min_len",
                 "\tadd\tx0, x0, :lo12:stone.gpu_min_len",
             ],
+            // only an x86-64 Windows program reaches nvcuda.dll
+            "stone.gpu_nvcuda" | "stone.gpu_symbol" | "stone.gpu_call" => &["\tmov\tx0, #0"],
             _ => continue,
         };
         r#gen.emit(&format!("{label}:"));
@@ -94,28 +89,10 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], recor
     }
 }
 
-/// Emits `stone.gpu_launch`.
-pub fn gpu_runtime(r#gen: &mut dyn AssemblyGenerator) {
-    r#gen.emit("stone.gpu_launch:");
-    r#gen.emit("\tmov\tx0, #0");
-    r#gen.emit("\tret");
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::codegen::arm64::Arm64Generator;
-
-    #[test]
-    fn a_launch_that_reaches_no_gpu_gives_zero() {
-        let mut generator = Arm64Generator::default();
-        gpu_runtime(&mut generator);
-        let text = &generator.output;
-        assert!(
-            text.contains("stone.gpu_launch:\n\tmov\tx0, #0\n\tret\n"),
-            "{text}"
-        );
-    }
 
     #[test]
     fn the_gpu_sys_routines_make_raw_system_calls() {
@@ -125,7 +102,7 @@ mod tests {
             .map(|(_, label)| *label)
             .filter(|label| label.starts_with("stone.gpu_"))
             .collect::<Vec<_>>();
-        assert_eq!(labels.len(), 18);
+        assert_eq!(labels.len(), 21);
         gpu_sys_runtime(&mut generator, &labels, 2);
         let text = &generator.output;
         for piece in [

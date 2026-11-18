@@ -80,6 +80,14 @@ environment variable changes this:
   1499999500000.0
   ```
 
+On Windows, in PowerShell:
+
+```console
+PS> $env:STONE_GPU = "require"; .\build\saxpy.exe
+1000000.0 1000001.0 1999999.0
+1499999500000.0
+```
+
 On Linux, `strace` shows the program opening the driver's devices:
 
 ```console
@@ -130,8 +138,13 @@ a function may read a global. The program decides once, when it reaches the stre
 keeping its lists on the GPU is worth it. If the GPU stops computing partway, for a zero divisor
 or anything else, the program brings every list back and computes the rest on the processor.
 
-On Linux the lists kept on the GPU live in memory the GPU reads over the bus, not yet in its
-own, so keeping them there saves copies but each kernel still reads them over the bus.
+On Windows the lists kept on the GPU live in its own memory. On Linux they live in memory the GPU
+reads over the bus, not yet in its own, so keeping them there saves copies but each kernel still
+reads them over the bus.
+
+On Windows, starting NVIDIA's driver takes a fifth of a second or so, which the program pays the
+first time it reaches arithmetic on lists, even when it then finds the GPU not worth it.
+`STONE_GPU=off` skips that.
 
 To test all of this on a machine without a GPU, build with `STONE_GPU_SIMULATE=1`: the program
 then computes each kernel on the processor, as the GPU would, and runs everything around it as
@@ -141,6 +154,5 @@ it does with a GPU. Run it with `STONE_GPU=require` to send every kernel there.
 
 - Only arithmetic on whole lists of ints or floats (`+`, `-`, `*`, float `/`, and negation)
   runs on the GPU; everything else runs on the processor.
-- Windows executables still launch every such piece of arithmetic, however short its lists,
-  and keep no list on the GPU between launches.
+
 - `stone run` never uses a GPU, and macOS executables carry no GPU code.

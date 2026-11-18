@@ -1,11 +1,13 @@
-//! The internal modules behind GPU kernels on Linux.
+//! The internal modules behind GPU kernels.
 //!
-//! A program built with `--gpu` for Linux runs its list arithmetic on an NVIDIA GPU when it can,
-//! talking to the kernel driver through `/dev/nvidiactl`, `/dev/nvidia-uvm`, and `/dev/nvidia0`
-//! itself, with no libc and no CUDA library. That driver is written in stone, in `gpu_nv.stn`,
-//! which such a build links with the program, and it reaches the system and raw memory through
-//! the internal module `gpu_sys`, whose routines compiled code emits for Linux alone. The
-//! interpreter never runs kernels, so it never calls them.
+//! A program built with `--gpu` runs its list arithmetic on an NVIDIA GPU when it can. The
+//! planner, `gpu_plan.stn`, decides where each piece runs and which lists stay on the GPU, and
+//! drives one of two drivers, both written in stone and linked with every such build: on Linux,
+//! `gpu_nv.stn` talks to the kernel driver through `/dev/nvidiactl`, `/dev/nvidia-uvm`, and
+//! `/dev/nvidia0` itself, with no libc and no CUDA library; on Windows, `gpu_cuda.stn` calls
+//! NVIDIA's CUDA driver interface in `nvcuda.dll`. Each reaches the system and raw memory through
+//! the internal module `gpu_sys`, and `gpu_sys.on_windows()` is a constant, so a program lowers
+//! only its own system's driver. The interpreter never runs kernels, so it never calls them.
 
 use super::BuiltinDoc;
 
@@ -14,6 +16,12 @@ pub const NV_MODULE: &str = "gpu_nv";
 
 /// The driver's stone source, which a build with `--gpu` links with the program.
 pub const NV_SOURCE: &str = include_str!("gpu_nv.stn");
+
+/// The name of the Windows driver module written in stone, over `nvcuda.dll`.
+pub const CUDA_MODULE: &str = "gpu_cuda";
+
+/// The Windows driver's stone source, which a build with `--gpu` links with the program.
+pub const CUDA_SOURCE: &str = include_str!("gpu_cuda.stn");
 
 /// The name of the module, written in stone, that decides where each kernel runs and calls the
 /// driver.
@@ -33,9 +41,9 @@ pub const SIM_SOURCE: &str = include_str!("gpu_sim.stn");
 pub const SYS_MODULE: &str = "gpu_sys";
 
 /// What the internal module is for.
-pub const SYS_MODULE_DOC: &str = "The system calls and raw memory behind GPU kernels on Linux.";
+pub const SYS_MODULE_DOC: &str = "The system calls and raw memory behind GPU kernels.";
 
-pub static SYS_DOCS: [BuiltinDoc; 19] = [
+pub static SYS_DOCS: [BuiltinDoc; 23] = [
     BuiltinDoc {
         name: "gpu_sys.open",
         signature: "gpu_sys.open(path: str) -> int",
@@ -141,6 +149,32 @@ pub static SYS_DOCS: [BuiltinDoc; 19] = [
                       a launch, 8 bytes per record and zero at first, which compiled code \
                       reads before each launch.",
     },
+    BuiltinDoc {
+        name: "gpu_sys.on_windows",
+        signature: "gpu_sys.on_windows() -> bool",
+        description: "Returns whether the program runs on Windows, a constant, so an `if` on \
+                      it lowers one branch: `gpu_plan` drives the GPU through `gpu_cuda` there \
+                      and `gpu_nv` elsewhere.",
+    },
+    BuiltinDoc {
+        name: "gpu_sys.nvcuda",
+        signature: "gpu_sys.nvcuda() -> int",
+        description: "Loads `nvcuda.dll` from the system directory alone and returns its \
+                      handle, or 0 if it is missing (Windows only).",
+    },
+    BuiltinDoc {
+        name: "gpu_sys.symbol",
+        signature: "gpu_sys.symbol(library: int, name: str) -> int",
+        description: "Returns the address of the function `name` of the loaded `library`, or \
+                      0 (Windows only).",
+    },
+    BuiltinDoc {
+        name: "gpu_sys.call",
+        signature: "gpu_sys.call(function: int, args: list[int]) -> int",
+        description: "Calls the function at `function` with Microsoft's convention, passing \
+                      `args` (at most 16), and returns all 64 bits of what it gives (Windows \
+                      only).",
+    },
 ];
 
 #[cfg(test)]
@@ -238,11 +272,16 @@ mod tests {
     }
 
     #[test]
-    fn the_planner_reads_the_images_layout() {
-        use crate::codegen::gpu::image::{SHAPE_SIZE, VERSION};
-        let source = super::PLAN_SOURCE;
-        assert!(source.contains(&format!("const image_version = {VERSION}\n")));
-        assert!(source.contains(&format!("const shape_size = {SHAPE_SIZE}\n")));
+    fn the_planner_and_the_windows_driver_read_the_images_layout() {
+        use crate::codegen::gpu::image::{DEVICE_SIZE, SHAPE_SIZE, VERSION};
+        for source in [super::PLAN_SOURCE, super::CUDA_SOURCE] {
+            assert!(source.contains(&format!("const image_version = {VERSION}\n")));
+            assert!(source.contains(&format!("const shape_size = {SHAPE_SIZE}\n")));
+        }
+        let source = super::CUDA_SOURCE;
+        assert!(source.contains(&format!("const device_size = {DEVICE_SIZE}\n")));
+        let max = crate::codegen::gpu::kernel::Shape::MAX_PARAMS;
+        assert!(source.contains(&format!("const max_params = {max}\n")));
     }
 
     #[test]
@@ -251,7 +290,7 @@ mod tests {
             Path::new("main.stn"),
             "print(1)\n",
             &MapSources::default(),
-            &[super::PLAN_MODULE, super::NV_MODULE],
+            &[super::PLAN_MODULE, super::NV_MODULE, super::CUDA_MODULE],
         );
         let rendered: Vec<String> = linked
             .diagnostics

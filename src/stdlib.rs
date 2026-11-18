@@ -85,7 +85,7 @@ pub static SOURCE_MODULES: [(&str, &str); 3] = [
 
 /// The modules written in stone that only stone's own modules may use, as they may use
 /// [`INTERNAL_MODULES`], by name with their source.
-pub static INTERNAL_SOURCE_MODULES: [(&str, &str); 9] = [
+pub static INTERNAL_SOURCE_MODULES: [(&str, &str); 10] = [
     gui::INTERNAL_SOURCES[0],
     gui::INTERNAL_SOURCES[1],
     gui::INTERNAL_SOURCES[2],
@@ -93,6 +93,7 @@ pub static INTERNAL_SOURCE_MODULES: [(&str, &str); 9] = [
     gui::INTERNAL_SOURCES[4],
     gui::INTERNAL_SOURCES[5],
     (gpu::NV_MODULE, gpu::NV_SOURCE),
+    (gpu::CUDA_MODULE, gpu::CUDA_SOURCE),
     (gpu::PLAN_MODULE, gpu::PLAN_SOURCE),
     (gpu::SIM_MODULE, gpu::SIM_SOURCE),
 ];

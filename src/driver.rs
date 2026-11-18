@@ -539,10 +539,10 @@ fn compile_with(
         Os::Windows => Some(image::Carry::Modules),
         Os::MacOs => None,
     };
-    // a Linux build can simulate its GPU for tests, which reach every path a GPU takes
+    // a build can simulate its GPU for tests, which reach every path a GPU takes
     let launch = if devices.is_empty() || carry.is_none() {
         codegen::gpu::Launch::Never
-    } else if target.os == Os::Linux && std::env::var_os(codegen::gpu::SIMULATE).is_some() {
+    } else if std::env::var_os(codegen::gpu::SIMULATE).is_some() {
         codegen::gpu::Launch::Simulated
     } else {
         codegen::gpu::Launch::Device

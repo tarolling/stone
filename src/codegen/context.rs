@@ -617,8 +617,11 @@ pub struct Context {
     /// for leaks before it returns.
     pub counts_references: bool,
     /// Whether arithmetic on lists that a GPU could compute first tries one, which a build with
-    /// `--gpu` for a system that can reach the GPU asks for.
+    /// GPU code for a system that can reach the GPU asks for.
     pub gpu_launch: crate::codegen::gpu::Launch,
+    /// What the build measured of this machine's GPU, from which the table of each record's
+    /// shortest list worth a launch is baked into the program ([`Context::min_lengths`]).
+    pub gpu_measured: Option<crate::codegen::gpu::detect::Measured>,
     /// The linked names of the test functions a build for `stone test` runs, one per run, or
     /// `None` for an ordinary build.
     pub tests: Option<Vec<String>>,
@@ -646,6 +649,36 @@ impl Context {
         }
         self.analysis = Rc::new(analysis);
         Ok(())
+    }
+
+    /// Returns each record's shortest list worth a launch on `target`, from the kernels' costs
+    /// and what the build measured of the GPU, as the planner works it out, or `None` when the
+    /// build measured nothing, so the program measures the GPU itself.
+    ///
+    /// For example, a kernel that saves no time on the GPU gets
+    /// [`NEVER`](crate::codegen::gpu::cost::NEVER).
+    pub fn min_lengths(&self, target: Target) -> Option<Vec<i64>> {
+        use crate::codegen::gpu::cost::min_length;
+        let measured = self.gpu_measured?;
+        let numbered = crate::codegen::gpu::numbered(&self.program.device_kernels, target).ok()?;
+        let (latency, up, down) = (
+            i64::try_from(measured.latency).ok()?,
+            i64::try_from(measured.up).ok()?,
+            i64::try_from(measured.down).ok()?,
+        );
+        let lengths = numbered.record_kernel.iter().map(|&kernel| {
+            let cost = numbered.shapes[kernel].cost;
+            min_length(
+                i64::from(cost.cpu_fs),
+                i64::from(cost.gpu_fs),
+                i64::from(cost.in_bytes),
+                i64::from(cost.out_bytes),
+                latency,
+                up,
+                down,
+            )
+        });
+        Some(lengths.collect())
     }
 
     /// Lowers the checked `module` to IR for a program that runs on `os`, then notes every

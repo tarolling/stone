@@ -13,9 +13,16 @@ use crate::codegen::{AssemblyGenerator, Os};
 /// too. The routines that reach `nvcuda.dll` exist only on Windows, and give 0 elsewhere, where
 /// nothing calls them.
 ///
-/// The table of each of the program's `records` shortest lists worth a launch comes with
+/// The table of each of the program's `records` shortest lists worth a launch, holding
+/// `min_lengths` when the build measured the GPU
+/// ([`min_length_table`](crate::codegen::gpu::min_length_table)), comes with
 /// `stone.gpu_min_lengths_address`, and the planner's block with `stone.gpu_plan_address`.
-pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], records: usize) {
+pub fn gpu_sys_runtime(
+    r#gen: &mut dyn AssemblyGenerator,
+    labels: &[&str],
+    records: usize,
+    min_lengths: Option<&[i64]>,
+) {
     let uses = |label: &str| labels.contains(&label);
     if uses("stone.gpu_get_slot") || uses("stone.gpu_set_slot") {
         r#gen.emit("\t.bss");
@@ -32,7 +39,7 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], recor
         r#gen.emit("\t.text");
     }
     if uses("stone.gpu_min_lengths_address") {
-        for line in crate::codegen::gpu::min_length_table(records).lines() {
+        for line in crate::codegen::gpu::min_length_table(records, min_lengths).lines() {
             r#gen.emit(line);
         }
     }
@@ -109,7 +116,7 @@ mod tests {
             .filter(|label| label.starts_with("stone.gpu_"))
             .collect::<Vec<_>>();
         assert_eq!(labels.len(), 21);
-        gpu_sys_runtime(&mut generator, &labels, 2);
+        gpu_sys_runtime(&mut generator, &labels, 2, None);
         let text = &generator.output;
         for piece in [
             "stone.gpu_open:\n\tmov\trsi, rdi\n\tmov\trdi, -100\n\tmov\tedx, 524290\n",
@@ -134,7 +141,7 @@ mod tests {
     fn windows_maps_memory_through_its_shim_and_reaches_nvcuda() {
         let mut generator = X64Generator::for_target(crate::codegen::Target::X64_WINDOWS);
         let labels = ["stone.gpu_mmap", "stone.gpu_munmap", "stone.gpu_call"];
-        gpu_sys_runtime(&mut generator, &labels, 0);
+        gpu_sys_runtime(&mut generator, &labels, 0, None);
         let text = &generator.output;
         assert!(
             text.contains("stone.gpu_mmap:\n\tmov\tr10, rcx\n\tcall\tstone.sys_mmap\n\tret\n"),
@@ -144,7 +151,7 @@ mod tests {
         assert!(text.contains(".Lgpu_call_go:\n\tcall\tr11\n"), "{text}");
         // Linux never calls nvcuda.dll, so its routines there give 0
         let mut generator = X64Generator::default();
-        gpu_sys_runtime(&mut generator, &labels, 0);
+        gpu_sys_runtime(&mut generator, &labels, 0, None);
         let text = &generator.output;
         assert!(
             text.contains("stone.gpu_call:\n\txor\teax, eax\n\tret\n"),
@@ -156,10 +163,32 @@ mod tests {
     #[test]
     fn only_the_routines_called_are_emitted() {
         let mut generator = X64Generator::default();
-        gpu_sys_runtime(&mut generator, &["stone.gpu_fence"], 0);
+        gpu_sys_runtime(&mut generator, &["stone.gpu_fence"], 0, None);
         let text = &generator.output;
         assert!(text.contains("stone.gpu_fence:"), "{text}");
         assert!(!text.contains("stone.gpu_open:"), "{text}");
         assert!(!text.contains("stone.gpu_slot:"), "{text}");
+    }
+
+    #[test]
+    fn a_build_that_measured_the_gpu_bakes_in_the_shortest_lists() {
+        let labels = ["stone.gpu_min_lengths_address"];
+        let mut generator = X64Generator::default();
+        gpu_sys_runtime(&mut generator, &labels, 2, Some(&[5000, i64::MAX]));
+        let text = &generator.output;
+        let table = "\t.data\n\t.p2align\t3\nstone.gpu_min_len:\nstone.gpu_min_len.0:\n\t.quad\t5000\n\
+                     stone.gpu_min_len.1:\n\t.quad\t9223372036854775807\n";
+        assert!(text.contains(table), "{text}");
+        crate::codegen::asm::assemble(text, crate::codegen::Architecture::X64).unwrap();
+        // without measurements, the program fills the table itself
+        let mut generator = X64Generator::default();
+        gpu_sys_runtime(&mut generator, &labels, 2, None);
+        let text = &generator.output;
+        assert!(
+            text.contains(
+                "\t.bss\n\t.p2align\t3\nstone.gpu_min_len:\nstone.gpu_min_len.0:\n\t.zero\t8\n"
+            ),
+            "{text}"
+        );
     }
 }

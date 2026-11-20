@@ -11,7 +11,7 @@ those of NVIDIA's open-gpu-kernel-modules for driver 595.
 The kernel is `stone_k0` of the saxpy program `y = a * x + y`, whose parameters are the result,
 the length, `a`, `x`, and `y`. Build one with ptxas on PATH (or STONE_PTXAS naming it):
 
-    stone build --gpu sm_89 saxpy.stn        # writes build/saxpy.sm_89.cubin
+    STONE_GPU_DEVICES=sm_89 stone build saxpy.stn   # writes build/saxpy.sm_89.cubin
 
 Usage: python3 scripts/nv-probe.py CUBIN [--dump DIR]
 

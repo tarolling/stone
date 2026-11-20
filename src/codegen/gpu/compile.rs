@@ -1,7 +1,7 @@
 //! Compiles PTX to a cubin with NVIDIA's `ptxas`.
 //!
 //! A program that talks to the GPU's kernel driver itself has no driver compiler to hand it PTX,
-//! so `stone build --gpu` compiles each module to machine code first and embeds the result.
+//! so `stone build` compiles each module to machine code first and embeds the result.
 //! `ptxas` comes with the CUDA toolkit, or from PyPI as the `nvidia-cuda-nvcc-cu12` package (in
 //! `nvidia/cuda_nvcc/bin`), which needs no GPU. `STONE_PTXAS` names another path for it.
 
@@ -46,6 +46,29 @@ pub fn compile_cubin(ptx: &str, device: Device) -> Result<Vec<u8>, CompileError>
     result
 }
 
+/// Returns whether `ptxas` runs, so a build can compile kernels for `device`, or the message
+/// [`compile_cubin`] would give for it missing.
+///
+/// For example, with `STONE_PTXAS=/nonexistent/ptxas`, the message starts `cannot run
+/// '/nonexistent/ptxas' to compile the kernels for sm_75`.
+pub fn ptxas_runs(device: Device) -> Result<(), String> {
+    let program = std::env::var_os(PTXAS_VARIABLE).unwrap_or_else(|| "ptxas".into());
+    match Command::new(&program).arg("--version").output() {
+        Ok(_) => Ok(()),
+        Err(error) => Err(missing(&program, device, &error)),
+    }
+}
+
+/// Returns the message of a `ptxas` that cannot run.
+fn missing(program: &std::ffi::OsStr, device: Device, error: &std::io::Error) -> String {
+    format!(
+        "cannot run '{}' to compile the kernels for {device}: {error} (install the CUDA toolkit, \
+         or `pip install nvidia-cuda-nvcc-cu12` and put its nvidia/cuda_nvcc/bin on PATH, or set \
+         {PTXAS_VARIABLE})",
+        program.to_string_lossy()
+    )
+}
+
 fn run(
     program: &std::ffi::OsStr,
     dir: &std::path::Path,
@@ -62,14 +85,7 @@ fn run(
         .arg(&output)
         .arg(&input)
         .output()
-        .map_err(|error| {
-            CompileError::Missing(format!(
-                "cannot run '{}' to compile the kernels for {device}: {error} (install the CUDA \
-                 toolkit, or `pip install nvidia-cuda-nvcc-cu12` and put its \
-                 nvidia/cuda_nvcc/bin on PATH, or set {PTXAS_VARIABLE})",
-                program.to_string_lossy()
-            ))
-        })?;
+        .map_err(|error| CompileError::Missing(missing(program, device, &error)))?;
     if !ran.status.success() {
         return Err(CompileError::Failed(format!(
             "ptxas rejected the kernels for {device}: {}",

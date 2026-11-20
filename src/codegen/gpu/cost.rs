@@ -133,6 +133,39 @@ fn size(kernel: &Kernel) -> usize {
     }
 }
 
+/// The shortest list worth a launch of a kernel the GPU never computes faster: a length no list
+/// reaches.
+pub const NEVER: i64 = i64::MAX;
+
+/// Returns the shortest list worth a launch of a kernel that costs `cpu` femtoseconds per element
+/// on the processor and `gpu` on the GPU, moving `bytes_in` bytes per element to the GPU and
+/// `bytes_out` back, on a GPU whose launch takes `latency` femtoseconds and whose transfers take
+/// `up` and `down` femtoseconds per byte, or [`NEVER`]. It computes what the planner's
+/// `gpu_plan.min_length` does when the program measures its GPU itself, so a build that measured
+/// the GPU bakes the same table into the program.
+///
+/// For example, saving 1 ns an element repays a 10 us launch from 10 000 elements on:
+/// `min_length(1_200_000, 200_000, 0, 0, 10_000_000_000, 0, 0)` is `10_000`.
+pub fn min_length(
+    cpu: i64,
+    gpu: i64,
+    bytes_in: i64,
+    bytes_out: i64,
+    latency: i64,
+    up: i64,
+    down: i64,
+) -> i64 {
+    // no measurement comes near overflowing, which would stop the planner
+    let saved = cpu
+        .saturating_sub(gpu)
+        .saturating_sub(bytes_in.saturating_mul(up))
+        .saturating_sub(bytes_out.saturating_mul(down));
+    if saved <= 0 {
+        return NEVER;
+    }
+    (latency.saturating_add(saved - 1) / saved).max(1)
+}
+
 fn saturate(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
 }
@@ -161,6 +194,30 @@ mod tests {
             os,
             level: Level { major, minor: 0 },
         }
+    }
+
+    #[test]
+    fn a_kernel_is_launched_only_for_lists_long_enough_to_repay_reaching_the_gpu() {
+        assert_eq!(
+            min_length(1_200_000, 200_000, 0, 0, 10_000_000_000, 0, 0),
+            10_000
+        );
+        // a part of an element still needs a whole one
+        assert_eq!(
+            min_length(1_200_000, 200_000, 0, 0, 10_000_000_001, 0, 0),
+            10_001
+        );
+        // moving 24 bytes an element costs more than computing it saves
+        assert_eq!(
+            min_length(1_680_000, 60_000, 16, 8, 10_000_000_000, 80_000, 80_000),
+            NEVER
+        );
+        assert_eq!(
+            min_length(20_000_000, 400_000, 16, 8, 10_000_000_000, 80_000, 80_000),
+            566
+        );
+        // never fewer than one element
+        assert_eq!(min_length(1_200_000, 200_000, 0, 0, 0, 0, 0), 1);
     }
 
     #[test]

@@ -1940,7 +1940,7 @@ fn dump_launching(source: &str, gpu_launch: bool) -> String {
 }
 
 /// Links, checks, and lowers the program `source` for `os` as [`dump_launching`] does, linking
-/// the modules written in stone named in `required` too, as `stone build --gpu` links the
+/// the modules written in stone named in `required` too, as a build with GPU code links the
 /// planner.
 fn dump_launching_for(
     source: &str,
@@ -2032,6 +2032,33 @@ fn a_program_for_a_gpu_tries_each_kernel_before_the_loop() {
         with.matches("list_set").count(),
         without.matches("list_set").count() + 7
     );
+}
+
+#[test]
+fn a_program_for_a_gpu_readies_the_planner_before_its_first_statement() {
+    use crate::codegen::Os;
+    use crate::stdlib::gpu::PLAN_MODULE;
+    // the arithmetic is in a function, not main
+    let source =
+        "fn f(a: list[float]) -> list[float]:\n    ret a * 2.0\nprint(1)\nprint(f([1.0]))\n";
+    for os in [Os::Linux, Os::Windows] {
+        let with = dump_launching_for(source, true, os, &[PLAN_MODULE]);
+        assert_eq!(
+            with.matches("call fn.gpu_plan.prepare()").count(),
+            1,
+            "{with}"
+        );
+        // before anything else main does, and lowered itself
+        let main = with.split("fn main").nth(1).expect("main is dumped");
+        let first = main.lines().find(|line| line.starts_with("  ")).unwrap();
+        assert!(first.contains("call fn.gpu_plan.prepare()"), "{main}");
+        assert!(with.contains("fn gpu_plan.prepare("), "{with}");
+    }
+    // nothing to launch, nothing to ready
+    let without = dump_launching_for("print(1)\n", true, Os::Linux, &[PLAN_MODULE]);
+    assert!(!without.contains("gpu_plan.prepare"), "{without}");
+    let never = dump_launching_for(source, false, Os::Linux, &[PLAN_MODULE]);
+    assert!(!never.contains("gpu_plan.prepare"), "{never}");
 }
 
 #[test]

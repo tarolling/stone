@@ -1,6 +1,6 @@
 //! The table of machine code a GPU build embeds in the executable.
 //!
-//! A program built with `--gpu` carries, in `.rodata` under the label `stone.gpu_image`, one blob
+//! A program built with GPU code carries, in `.rodata` under the label `stone.gpu_image`, one blob
 //! that holds the code of every kernel for every GPU it was built for, and what a launch needs to
 //! know about each. The blob refers to itself by offsets from its start, so it holds no address
 //! and is the same on every processor and system. Everything is little-endian, and every part
@@ -8,7 +8,11 @@
 //! 128.
 //!
 //! ```text
-//! header   (32 bytes)  "STONEGPU", version u32, devices u32, records u32, kernels u32, size u64
+//! header   (64 bytes)  "STONEGPU", version u32, devices u32, records u32, kernels u32, size u64,
+//!                      then what the build measured of the GPU: its capability times 10 u32 (0
+//!                      when it measured nothing), 4 bytes of padding, and the latency of a
+//!                      launch, the time per byte up, and the time per byte down, in
+//!                      femtoseconds (u64 each)
 //! records  (4 each)    the kernel that computes each record, padded to 8 bytes
 //! shapes   (48 each)   per kernel: params u32, flags u32, lists u64, then its cost per
 //!                      element: bytes in u32, bytes out u32, processor time u32, GPU time u32,
@@ -37,6 +41,7 @@
 
 use super::cost::Cost;
 use super::cubin::CubinKernel;
+use super::detect::Measured;
 use super::kernel::Shape;
 use crate::codegen::context::escape_bytes;
 use crate::codegen::device::Device;
@@ -44,12 +49,12 @@ use crate::codegen::device::Device;
 /// The first bytes of an image.
 pub const MAGIC: &[u8; 8] = b"STONEGPU";
 /// The version of the layout above.
-pub const VERSION: u32 = 4;
+pub const VERSION: u32 = 5;
 /// The label of the image in the executable.
 pub const LABEL: &str = "stone.gpu_image";
 
 /// The size of the header.
-pub const HEADER_SIZE: usize = 32;
+pub const HEADER_SIZE: usize = 64;
 /// The size of a shape.
 pub const SHAPE_SIZE: usize = 48;
 /// The size of a device entry.
@@ -122,6 +127,8 @@ pub struct Image {
     /// Each kernel's program for a simulated GPU ([`program`](super::kernel::program)), or none.
     pub programs: Vec<Vec<u8>>,
     pub devices: Vec<DeviceImage>,
+    /// What the build measured of the GPU it found, or `None`.
+    pub measured: Option<Measured>,
 }
 
 /// What a GPU loads of a device entry: its cubin or its PTX.
@@ -140,13 +147,30 @@ pub enum Module {
 ///
 /// For example, a program with two kernels built for `sm_75` gives an image of one device whose
 /// two kernels hold the cubin's code under [`Carry::Sass`], or that holds the cubin and the PTX
-/// under [`Carry::Modules`].
+/// under [`Carry::Modules`]. The image says the build measured nothing of the GPU; see
+/// [`build_measured`].
 pub fn build(
     record_kernel: &[usize],
     shapes: &[Shape],
     programs: &[Vec<u8>],
     devices: &[DeviceCode],
     carry: Carry,
+) -> Result<Vec<u8>, String> {
+    build_measured(record_kernel, shapes, programs, devices, carry, None)
+}
+
+/// Returns the image [`build`] does, holding `measured`, what the build measured of the GPU it
+/// found, so the program needs to measure that GPU no more.
+///
+/// For example, with a measured `sm_75`, the header holds 75 at offset 32 and the latency and
+/// times per byte after it.
+pub fn build_measured(
+    record_kernel: &[usize],
+    shapes: &[Shape],
+    programs: &[Vec<u8>],
+    devices: &[DeviceCode],
+    carry: Carry,
+    measured: Option<&Measured>,
 ) -> Result<Vec<u8>, String> {
     if record_kernel.iter().any(|&kernel| kernel >= shapes.len()) {
         return Err("a record names a kernel that does not exist".into());
@@ -301,6 +325,12 @@ pub fn build(
     let size = align(bytes.len(), 8);
     bytes.resize(size, 0);
     put_u64(&mut bytes, 24, size as u64);
+    if let Some(measured) = measured {
+        put_u32(&mut bytes, 32, measured.sm);
+        put_u64(&mut bytes, 40, measured.latency);
+        put_u64(&mut bytes, 48, measured.up);
+        put_u64(&mut bytes, 56, measured.down);
+    }
     Ok(bytes)
 }
 
@@ -410,11 +440,21 @@ pub fn parse(bytes: &[u8]) -> Result<Image, String> {
     if programs.len() != kernels {
         programs.clear();
     }
+    let measured = match word(32)? {
+        0 => None,
+        sm => Some(Measured {
+            sm,
+            latency: long(40)?,
+            up: long(48)?,
+            down: long(56)?,
+        }),
+    };
     Ok(Image {
         record_kernel,
         shapes,
         programs,
         devices: images,
+        measured,
     })
 }
 
@@ -711,6 +751,40 @@ mod tests {
         let source = crate::stdlib::gpu::NV_SOURCE;
         assert!(source.contains(&format!("const image_version = {VERSION}\n")));
         assert!(source.contains(&format!("const shape_size = {SHAPE_SIZE}\n")));
+        assert!(source.contains(&format!("const header_size = {HEADER_SIZE}\n")));
+    }
+
+    #[test]
+    fn an_image_gives_back_what_the_build_measured_of_the_gpu() {
+        let measured = Measured {
+            sm: 75,
+            latency: 9_000_000_000,
+            up: 80_000,
+            down: 90_000,
+        };
+        let bytes = build_measured(
+            &[1, 0],
+            &shapes(),
+            &[],
+            &[code("sm_75")],
+            Carry::Modules,
+            Some(&measured),
+        )
+        .unwrap();
+        assert_eq!(&bytes[32..36], &75u32.to_le_bytes());
+        assert_eq!(&bytes[40..48], &9_000_000_000u64.to_le_bytes());
+        assert_eq!(&bytes[48..56], &80_000u64.to_le_bytes());
+        assert_eq!(&bytes[56..64], &90_000u64.to_le_bytes());
+        let image = parse(&bytes).unwrap();
+        assert_eq!(image.measured, Some(measured));
+        assert_eq!(image.record_kernel, [1, 0]);
+        assert_eq!(image.shapes, shapes());
+        // the records start right after the header
+        assert_eq!(&bytes[HEADER_SIZE..HEADER_SIZE + 4], &1u32.to_le_bytes());
+        // a build that measured nothing leaves the fields 0
+        let bytes = build(&[1, 0], &shapes(), &[], &[code("sm_75")], Carry::Modules).unwrap();
+        assert!(bytes[32..64].iter().all(|&byte| byte == 0));
+        assert_eq!(parse(&bytes).unwrap().measured, None);
     }
 
     #[test]

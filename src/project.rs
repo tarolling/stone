@@ -447,7 +447,7 @@ pub fn link(entry: &Path, source: &str, sources: &dyn Sources) -> Linked {
 /// For example, with `p` as the root, the entry file `p/geometry/shapes.stn` can use
 /// `geometry.vec`, and is itself the module `geometry.shapes`.
 pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -> Linked {
-    link_requiring(root, entry, source, sources, &[])
+    link_requiring(root, entry, source, sources, &[], false)
 }
 
 /// Links like [`link`], loading the modules written in stone named in `required` as well, used
@@ -457,7 +457,23 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
 /// program that never names it.
 pub fn link_with(entry: &Path, source: &str, sources: &dyn Sources, required: &[&str]) -> Linked {
     let root = entry.parent().unwrap_or(Path::new(""));
-    link_requiring(root, entry, source, sources, required)
+    link_requiring(root, entry, source, sources, required, false)
+}
+
+/// Links like [`link_with`] a program that stone writes itself, such as the one `stone build`
+/// runs to measure a GPU, whose entry file may use stone's internal modules as stone's own
+/// modules do.
+///
+/// For example, a program holding `use gpu_plan` links with `link_internal(entry, source,
+/// sources, &["gpu_plan"])`, where [`link_with`] reports `no module named 'gpu_plan'`.
+pub fn link_internal(
+    entry: &Path,
+    source: &str,
+    sources: &dyn Sources,
+    required: &[&str],
+) -> Linked {
+    let root = entry.parent().unwrap_or(Path::new(""));
+    link_requiring(root, entry, source, sources, required, true)
 }
 
 fn link_requiring(
@@ -466,6 +482,7 @@ fn link_requiring(
     source: &str,
     sources: &dyn Sources,
     required: &[&str],
+    internal: bool,
 ) -> Linked {
     let relative = entry.strip_prefix(root).unwrap_or(entry).with_extension("");
     let entry_names = relative
@@ -501,7 +518,10 @@ fn link_requiring(
         tests: vec![],
         diagnostics: vec![],
     };
-    loader.add(entry.to_path_buf(), String::new(), source.to_string(), 0);
+    let entry_file = loader.add(entry.to_path_buf(), String::new(), source.to_string(), 0);
+    if internal {
+        loader.own.insert(entry_file);
+    }
     loader.load_packages();
     for name in required {
         loader.module(0, &[name.to_string()], true);

@@ -1,17 +1,17 @@
 # Running code on the GPU
 
-A program built with `--gpu` runs its arithmetic on whole lists on an NVIDIA GPU, with the same
-results it gives on the processor. Nothing in the program changes: each piece of arithmetic such
-as `xs * 2.0 + ys` becomes a kernel.
+`stone build` makes a program that runs its arithmetic on whole lists on the machine's NVIDIA
+GPU, with the same results it gives on the processor. Nothing in the program changes, and no
+flag asks for it: each piece of arithmetic such as `xs * 2.0 + ys` becomes a kernel.
 
 ## What you need
 
 - An NVIDIA GPU and its driver. Linux executables speak to the driver themselves, with no
   libcuda, and so far know driver version 595 and the Ampere (`sm_86`) and Ada
   (`sm_89`) generations. Windows executables use `nvcuda.dll` and run on any GPU it supports.
-  `nvidia-smi` shows the driver version, and
-  `nvidia-smi --query-gpu=compute_cap --format=csv` the GPU's compute capability (8.9 is
-  `sm_89`).
+  `stone build` finds the GPU through `nvidia-smi`, which comes with the driver;
+  `nvidia-smi --query-gpu=name,compute_cap,driver_version --format=csv` shows what it
+  finds (a compute capability of 8.9 is `sm_89`).
 - NVIDIA's `ptxas`, which compiles the kernels to machine code. Linux executables need it, since
   they run only machine code; Windows ones can leave the PTX to the driver. It needs no GPU and
   comes in a Python wheel:
@@ -43,17 +43,27 @@ for z in zs:
 print(total)
 ```
 
-Build it for your GPU with `--gpu` (give it more than once for several GPUs):
+Build it as any program:
 
 ```console
-$ stone build saxpy.stn --gpu sm_89
+$ stone build saxpy.stn
+note: measured the GPU, NVIDIA RTX 4000 Ada Generation (sm_89), to decide where arithmetic on lists runs; later builds reuse it
 Compiled build/saxpy
 $ ls build
 saxpy  saxpy.s  saxpy.sm_89.cubin  saxpy.sm_89.ptx
 ```
 
 The `.ptx` and `.cubin` files are the kernels as text and as machine code; the executable
-carries both, so it is all you need to run.
+carries both, so it is all you need to run. The first build on a machine also measures its
+GPU, which takes about a second, and keeps what it found in `gpu/` under stone's home
+directory, so later builds measure nothing (see [When the GPU computes](#when-the-gpu-computes)).
+
+`stone build --no-gpu` writes no GPU code. A build for another machine (`--target`) writes
+none either, unless the `STONE_GPU_DEVICES` environment variable names GPUs to write code for
+(`STONE_GPU_DEVICES=sm_86,sm_89`), in which case the program measures the GPU it finds when it
+first reaches such arithmetic. When `stone build` finds no usable GPU, it writes no GPU code
+and, if it measured the GPU, says why, such as
+`note: no GPU code: NVIDIA's driver is missing or unsupported`.
 
 ## Running
 
@@ -110,12 +120,16 @@ processor takes to compute it, so stone decides where each piece runs:
 - `stone build` records, for each kernel, how many bytes an element moves each way and how long
   an element takes on the processor (counting how many its vector instructions compute at a
   time at the target's level) and on the GPU.
-- The first time the program reaches such arithmetic, it starts the GPU and measures it: the
-  time a launch that does nothing takes, and how fast lists move. A GPU that cannot finish that
-  test in time, or moves lists too slowly, counts as one the program cannot use.
-- From both, it works out for each kernel the shortest list worth a launch. Before each launch
-  the program compares the list's length with it, so a short list costs one compare and never a
-  call.
+- `stone build` measures this machine's GPU once, by building and running a tiny program of
+  its own: the time a launch that does nothing takes, and how fast lists move. A GPU that
+  cannot finish that test in time, or moves lists too slowly, counts as one a program cannot
+  use. What it found is kept for each GPU, driver version, version of stone, and target.
+- From both, it works out for each kernel the shortest list worth a launch, and bakes those
+  lengths into the program. Before each launch the program compares the list's length with
+  it, so a short list costs one compare and never a call, and a program whose lists are all
+  short never starts the GPU's driver.
+- A program run on a GPU of another compute capability than the one measured, or built for
+  GPUs `STONE_GPU_DEVICES` names, measures the GPU itself the first time it launches a kernel.
 
 Under `STONE_GPU` unset, a kernel whose element is cheaper on the processor than the time it
 takes to move it never runs on the GPU, however long its lists. `STONE_GPU=always` and
@@ -143,10 +157,13 @@ reads over the bus, not yet in its own, so keeping them there saves copies but e
 reads them over the bus.
 
 On Windows, starting NVIDIA's driver takes a fifth of a second or so, which the program pays the
-first time it reaches arithmetic on lists, even when it then finds the GPU not worth it.
-`STONE_GPU=off` skips that.
+first time it launches a kernel, once per run. Since the build already measured the GPU, that
+only happens for arithmetic on lists long enough to be worth the GPU; a program built for GPUs
+`STONE_GPU_DEVICES` names pays it, and measures the GPU, the first time it reaches arithmetic
+on lists. `STONE_GPU=off` skips that.
 
-To test all of this on a machine without a GPU, build with `STONE_GPU_SIMULATE=1`: the program
+To test all of this on a machine without a GPU, build with `STONE_GPU_SIMULATE=1` and
+`STONE_GPU_DEVICES=sm_75`: the program
 then computes each kernel on the processor, as the GPU would, and runs everything around it as
 it does with a GPU. Run it with `STONE_GPU=require` to send every kernel there.
 

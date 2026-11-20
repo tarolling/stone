@@ -1572,6 +1572,35 @@ fn only_stones_own_modules_can_use_its_internal_modules_written_in_stone() {
     );
 }
 
+#[test]
+fn a_program_stone_writes_itself_can_use_its_internal_modules() {
+    let source = "use gpu_plan\nprint(gpu_plan.mode_of(\"off\"))\n";
+    let sources = sources_of(&[]);
+    let required = [crate::stdlib::gpu::PLAN_MODULE];
+    let linked = link_internal(Path::new("probe.stn"), source, &sources, &required);
+    assert_eq!(linked.diagnostics, []);
+    // the same program of the user's own is not allowed to
+    let linked = link_with(Path::new("main.stn"), source, &sources, &required);
+    assert!(
+        linked.diagnostics[0]
+            .message
+            .contains("no module named 'gpu_plan'"),
+        "{:?}",
+        linked.diagnostics
+    );
+    // and stone's own probe links and checks
+    let (_, checked) = crate::driver::check_linked(
+        link_internal(
+            Path::new("gpu_probe.stn"),
+            crate::stdlib::gpu::PROBE_SOURCE,
+            &sources,
+            &required,
+        ),
+        &sources,
+    );
+    assert!(checked.is_ok(), "{checked:?}");
+}
+
 /// Returns the name of every function the linked module defines from `files`, outside the
 /// prelude, in order.
 fn defined_functions(files: &[(&str, &str)]) -> Vec<String> {

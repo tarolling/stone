@@ -7,9 +7,16 @@ use crate::codegen::AssemblyGenerator;
 /// its result in `x0`. The system calls give a negative error number on failure, as Linux returns
 /// it, so these routines are for Linux only.
 ///
-/// The table of each of the program's `records` shortest lists worth a launch comes with
+/// The table of each of the program's `records` shortest lists worth a launch, holding
+/// `min_lengths` when the build measured the GPU
+/// ([`min_length_table`](crate::codegen::gpu::min_length_table)), comes with
 /// `stone.gpu_min_lengths_address`, and the planner's block with `stone.gpu_plan_address`.
-pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], records: usize) {
+pub fn gpu_sys_runtime(
+    r#gen: &mut dyn AssemblyGenerator,
+    labels: &[&str],
+    records: usize,
+    min_lengths: Option<&[i64]>,
+) {
     let uses = |label: &str| labels.contains(&label);
     if uses("stone.gpu_get_slot") || uses("stone.gpu_set_slot") {
         r#gen.emit("\t.bss");
@@ -26,7 +33,7 @@ pub fn gpu_sys_runtime(r#gen: &mut dyn AssemblyGenerator, labels: &[&str], recor
         r#gen.emit("\t.text");
     }
     if uses("stone.gpu_min_lengths_address") {
-        for line in crate::codegen::gpu::min_length_table(records).lines() {
+        for line in crate::codegen::gpu::min_length_table(records, min_lengths).lines() {
             r#gen.emit(line);
         }
     }
@@ -103,7 +110,7 @@ mod tests {
             .filter(|label| label.starts_with("stone.gpu_"))
             .collect::<Vec<_>>();
         assert_eq!(labels.len(), 21);
-        gpu_sys_runtime(&mut generator, &labels, 2);
+        gpu_sys_runtime(&mut generator, &labels, 2, None);
         let text = &generator.output;
         for piece in [
             "stone.gpu_open:\n\tmov\tx1, x0\n\tmov\tx0, #-100\n",
@@ -128,7 +135,7 @@ mod tests {
     #[test]
     fn only_the_routines_called_are_emitted() {
         let mut generator = Arm64Generator::default();
-        gpu_sys_runtime(&mut generator, &["stone.gpu_fence"], 0);
+        gpu_sys_runtime(&mut generator, &["stone.gpu_fence"], 0, None);
         let text = &generator.output;
         assert!(text.contains("stone.gpu_fence:"), "{text}");
         assert!(!text.contains("stone.gpu_open:"), "{text}");

@@ -3,6 +3,7 @@
 //! For example, `stone check` on a file with a syntax error must exit with a failure and print the
 //! error with its file, line, and column.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -10,12 +11,23 @@ use std::process::{Command, Output};
 ///
 /// For example, `stone(&["check"], "ok", "x = 1\n")` checks a one-line program.
 fn stone(args: &[&str], name: &str, source: &str) -> (Output, PathBuf) {
+    stone_with(args, &[], name, source)
+}
+
+/// Runs stone as [`stone`] does, with the environment variables `env` set.
+fn stone_with(
+    args: &[&str],
+    env: &[(&str, &OsStr)],
+    name: &str,
+    source: &str,
+) -> (Output, PathBuf) {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let file = dir.join(format!("{name}.stn"));
     std::fs::write(&file, source).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_stone"))
         .args(args)
         .arg(&file)
+        .envs(env.iter().copied())
         .output()
         .expect("stone should run");
     (output, file)
@@ -717,8 +729,9 @@ fn build_writes_ptx_for_each_gpu_beside_the_program() {
     let ptx = dir.join("gpu_kernels.sm_75.ptx");
     let _ = std::fs::remove_file(&ptx);
     let exe_arg = exe.to_str().unwrap();
-    let (output, _) = stone(
-        &["build", "--gpu", "sm_75", "--gpu", "sm_90", "-o", exe_arg],
+    let (output, _) = stone_with(
+        &["build", "-o", exe_arg],
+        &[("STONE_GPU_DEVICES", OsStr::new("sm_75,sm_90"))],
         "gpu_kernels",
         "a = [1.0, 2.0]\nb = [0.5, 0.25]\nprint(a * 2.0 + b)\nprint([1, 2] * 3)\n",
     );
@@ -756,8 +769,9 @@ fn build_compiles_the_kernels_of_each_gpu_to_a_cubin() {
     let exe = dir.join("gpu_cubin");
     let cubin = dir.join("gpu_cubin.sm_75.cubin");
     let _ = std::fs::remove_file(&cubin);
-    let (output, _) = stone(
-        &["build", "--gpu", "sm_75", "-o", exe.to_str().unwrap()],
+    let (output, _) = stone_with(
+        &["build", "-o", exe.to_str().unwrap()],
+        &[("STONE_GPU_DEVICES", OsStr::new("sm_75"))],
         "gpu_cubin",
         "a = [1.0, 2.0]\nb = [0.5, 0.25]\nprint(a * 2.0 + b)\n",
     );
@@ -779,12 +793,10 @@ fn build_compiles_the_kernels_of_each_gpu_to_a_cubin() {
 
 /// The program of the GPU image tests: `stone_k0` is `a * 2.0 + b` and `stone_k1` divides, as the
 /// kernels of the fixture cubin `two_kernels.sm_75.cubin` are.
-#[cfg(target_os = "linux")]
 const TWO_KERNEL_PROGRAM: &str =
     "a = [1.0, 2.0]\nb = [0.5, 0.25]\nprint(a * 2.0 + b)\nprint(a / b)\n";
 
 /// Returns the image a GPU build embedded in the executable at `exe`.
-#[cfg(target_os = "linux")]
 fn embedded_image(exe: &Path) -> stone::codegen::gpu::image::Image {
     use stone::codegen::gpu::image;
     let bytes = std::fs::read(exe).unwrap();
@@ -821,7 +833,8 @@ fn build_embeds_the_machine_code_of_each_gpu_in_the_program() {
     let _ = std::fs::remove_file(&exe);
     let build = || {
         Command::new(env!("CARGO_BIN_EXE_stone"))
-            .args(["build", "--gpu", "sm_90", "--gpu", "sm_75", "-o"])
+            .args(["build", "-o"])
+            .env("STONE_GPU_DEVICES", "sm_90,sm_75")
             .arg(&exe)
             .arg(&file)
             .env("STONE_PTXAS", &fake)
@@ -882,7 +895,8 @@ fn a_gpu_build_without_ptxas_embeds_an_image_with_no_devices() {
     let exe = dir.join("gpu_image_empty");
     let _ = std::fs::remove_file(&exe);
     let output = Command::new(env!("CARGO_BIN_EXE_stone"))
-        .args(["build", "--gpu", "sm_75", "-o"])
+        .args(["build", "-o"])
+        .env("STONE_GPU_DEVICES", "sm_75")
         .arg(&exe)
         .arg(&file)
         .env("STONE_PTXAS", "/nonexistent/ptxas")
@@ -930,26 +944,182 @@ fn a_gpu_build_without_ptxas_embeds_an_image_with_no_devices() {
     );
 }
 
-#[cfg(target_os = "linux")]
+/// Returns whether `bytes`, an executable, holds a GPU image.
+fn holds_gpu_image(bytes: &[u8]) -> bool {
+    bytes
+        .windows(8)
+        .any(|window| window == stone::codegen::gpu::image::MAGIC)
+}
+
 #[test]
-fn a_build_without_gpus_embeds_no_image() {
+fn a_build_with_no_gpu_writes_no_gpu_code() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let file = dir.join("no_gpu_image.stn");
-    std::fs::write(&file, TWO_KERNEL_PROGRAM).unwrap();
-    let exe = dir.join("no_gpu_image");
-    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
-        .args(["build", "-o"])
-        .arg(&exe)
-        .arg(&file)
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{output:?}");
-    let bytes = std::fs::read(&exe).unwrap();
-    assert!(
-        !bytes
-            .windows(8)
-            .any(|window| window == stone::codegen::gpu::image::MAGIC)
+    let exe = dir.join("no_gpu_code");
+    let ptx = dir.join("no_gpu_code.sm_75.ptx");
+    let _ = std::fs::remove_file(&ptx);
+    // even GPUs named for it
+    let (output, _) = stone_with(
+        &["build", "--no-gpu", "-o", exe.to_str().unwrap()],
+        &[("STONE_GPU_DEVICES", OsStr::new("sm_75"))],
+        "no_gpu_code",
+        "a = [1.0, 2.0]\nb = [0.5, 0.25]\nprint(a * 2.0 + b)\nprint(a / b)\n",
     );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert!(!ptx.exists());
+    assert!(!holds_gpu_image(&std::fs::read(&exe).unwrap()));
+}
+
+/// Builds the program `source` with `stone build --no-gpu` into `exe` (with the system's
+/// extension for programs), giving the path it wrote, for a test that needs a program to stand
+/// in for another tool.
+fn build_tool(name: &str, source: &str, exe: &Path) -> PathBuf {
+    let exe = exe.with_extension(std::env::consts::EXE_EXTENSION);
+    let (output, _) = stone(
+        &["build", "--no-gpu", "-o", exe.to_str().unwrap()],
+        name,
+        source,
+    );
+    assert!(output.status.success(), "{output:?}");
+    exe
+}
+
+#[test]
+fn a_build_where_nvidia_smi_finds_no_gpu_writes_no_gpu_code() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("smi_no_gpu");
+    std::fs::create_dir_all(&dir).unwrap();
+    // what nvidia-smi prints on a machine with a driver and no GPU
+    let smi = build_tool(
+        "smi_no_gpu_tool",
+        "print(\"No devices were found\")\n",
+        &dir.join("nvidia-smi"),
+    );
+    let exe = dir.join("program");
+    let ptx = dir.join("program.sm_75.ptx");
+    let _ = std::fs::remove_file(&ptx);
+    let home = dir.join("home");
+    let _ = std::fs::remove_dir_all(&home);
+    let (output, _) = stone_with(
+        &["build", "-o", exe.to_str().unwrap()],
+        &[
+            ("STONE_NVIDIA_SMI", smi.as_os_str()),
+            ("STONE_HOME", home.as_os_str()),
+        ],
+        "smi_no_gpu",
+        "a = [1.0, 2.0]\nprint(a * 2.0 + a)\n",
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert!(!ptx.exists());
+    assert!(!holds_gpu_image(&std::fs::read(&exe).unwrap()));
+    // and nothing was measured, so nothing is kept
+    assert!(!home.join("gpu").exists());
+}
+
+/// Builds a program on a machine whose `nvidia-smi` reports a GPU that an earlier build measured,
+/// so the build bakes the measurement into the program and runs nothing to measure it.
+#[test]
+fn a_build_bakes_in_what_an_earlier_build_measured_of_the_gpu() {
+    use stone::codegen::Os;
+    use stone::codegen::gpu::detect::{Measured, cache_name};
+    let Ok(host) = stone::codegen::Target::host() else {
+        return;
+    };
+    // a Linux program reaches the GPU only through the kernel driver, with ptxas's machine code
+    let linux_without =
+        host.os == Os::Linux && (!Path::new("/dev/nvidiactl").exists() || !has_ptxas());
+    if host.os == Os::MacOs || linux_without {
+        eprintln!("skipped baking measurements: builds on this machine carry no GPU code");
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("smi_measured");
+    std::fs::create_dir_all(&dir).unwrap();
+    let line = "Fake GPU, 7.5, 1.0, 00000000:01:00.0";
+    let smi = build_tool(
+        "smi_measured_tool",
+        &format!("print(\"{line}\")\n"),
+        &dir.join("nvidia-smi"),
+    );
+    let home = dir.join("home");
+    let _ = std::fs::remove_dir_all(&home);
+    let measured = Measured {
+        sm: 75,
+        latency: 20_000_000_000,
+        up: 90_000,
+        down: 90_000,
+    };
+    let cache = home.join("gpu").join(cache_name(
+        line,
+        env!("CARGO_PKG_VERSION"),
+        &host.to_string(),
+    ));
+    std::fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    std::fs::write(&cache, "ok 75 20000000000 90000 90000\n").unwrap();
+    let exe = dir.join(format!("program{}", std::env::consts::EXE_SUFFIX));
+    let ptx = dir.join("program.sm_75.ptx");
+    let env = |devices: Option<&'static str>| {
+        let mut env = vec![
+            ("STONE_NVIDIA_SMI", smi.as_os_str()),
+            ("STONE_HOME", home.as_os_str()),
+        ];
+        env.extend(devices.map(|devices| ("STONE_GPU_DEVICES", OsStr::new(devices))));
+        env
+    };
+    // an empty STONE_GPU_DEVICES names no GPU, and finds none
+    let _ = std::fs::remove_file(&ptx);
+    let build = |devices| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_stone"));
+        command.args(["build", "-o"]).arg(&exe);
+        command.arg(dir.join("program.stn"));
+        command.env_remove("STONE_GPU_DEVICES");
+        command.envs(env(devices)).output().unwrap()
+    };
+    std::fs::write(dir.join("program.stn"), TWO_KERNEL_PROGRAM).unwrap();
+    let output = build(Some(""));
+    assert!(output.status.success(), "{output:?}");
+    assert!(!ptx.exists());
+
+    let output = build(None);
+    assert!(output.status.success(), "{output:?}");
+    // the measurement was kept, so nothing is measured or said
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert!(ptx.exists());
+    let image = embedded_image(&exe);
+    assert_eq!(image.measured, Some(measured));
+    assert_eq!(image.devices.len(), 1);
+    assert_eq!(image.devices[0].sm, 75);
+    // each record's shortest list worth a launch is in the program from its start
+    let assembly = std::fs::read_to_string(dir.join("program.s")).unwrap();
+    let table = assembly
+        .split("\t.data\n\t.p2align\t3\nstone.gpu_min_len:\n")
+        .nth(1)
+        .expect("the program has the table in .data");
+    for (record, &kernel) in image.record_kernel.iter().enumerate() {
+        let cost = image.shapes[kernel as usize].cost;
+        let shortest = stone::codegen::gpu::cost::min_length(
+            cost.cpu_fs.into(),
+            cost.gpu_fs.into(),
+            cost.in_bytes.into(),
+            cost.out_bytes.into(),
+            20_000_000_000,
+            90_000,
+            90_000,
+        );
+        let entry = format!("stone.gpu_min_len.{record}:\n\t.quad\t{shortest}\n");
+        assert!(table.contains(&entry), "{entry} in {table}");
+    }
+    // two elements are not worth a launch, so the program never starts the GPU
+    for setting in ["", "off"] {
+        let ran = Command::new(&exe)
+            .env("STONE_GPU", setting)
+            .output()
+            .unwrap();
+        assert!(ran.status.success(), "{ran:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout),
+            "[2.5, 4.25]\n[2.0, 8.0]\n"
+        );
+    }
 }
 
 #[test]
@@ -957,21 +1127,30 @@ fn build_rejects_a_gpu_it_cannot_generate_code_for() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let exe = dir.join("gpu_amd");
     let _ = std::fs::remove_file(&exe);
-    let (output, _) = stone(
-        &["build", "--gpu", "gfx1100", "-o", exe.to_str().unwrap()],
+    let (output, _) = stone_with(
+        &["build", "-o", exe.to_str().unwrap()],
+        &[("STONE_GPU_DEVICES", OsStr::new("gfx1100"))],
         "gpu_amd",
         "print(1)\n",
     );
     assert!(!output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "error: AMD GPUs (gfx1100) are not supported yet\n"
+        "error: STONE_GPU_DEVICES: AMD GPUs (gfx1100) are not supported yet\n"
     );
     assert!(!exe.exists());
-    let (output, _) = stone(&["build", "--gpu", "cuda"], "gpu_unknown", "print(1)\n");
+    let (output, _) = stone_with(
+        &["build"],
+        &[("STONE_GPU_DEVICES", OsStr::new("sm_75,cuda"))],
+        "gpu_unknown",
+        "print(1)\n",
+    );
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("unknown GPU 'cuda'"), "{stderr}");
+    assert!(
+        stderr.contains("error: STONE_GPU_DEVICES: unknown GPU 'cuda'"),
+        "{stderr}"
+    );
 }
 
 #[test]

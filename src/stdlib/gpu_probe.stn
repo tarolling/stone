@@ -1,0 +1,14 @@
+// The program `stone build` builds and runs once per GPU, driver, version of stone, and target to
+// measure this machine's GPU, then bakes what it prints into the programs it builds. It prints
+// one line: `ok`, the GPU's compute capability times 10, the latency of a launch, and the times
+// per byte of moving a list to the GPU and back, in femtoseconds, or `none` and the refusal code
+// of a GPU that cannot be used.
+
+use gpu_plan
+
+// The arithmetic that gives the program a kernel, which measuring launches over no elements;
+// nothing calls it.
+fn kernel(a: list[float]) -> list[float]:
+    ret a * 2.0 + a
+
+gpu_plan.measure()

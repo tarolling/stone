@@ -10,15 +10,17 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.4.7] - 2026-11-19
+
 ### Added
 
-- Linux executables built with `--gpu` run their arithmetic on lists on an NVIDIA GPU, on
+- Linux executables with GPU code run their arithmetic on lists on an NVIDIA GPU, on
   x86-64 and arm64, speaking to NVIDIA's kernel driver through `/dev/nvidia*` themselves with no
   libcuda. They need the machine code `ptxas` makes, and so far know driver version 595 and
   Ampere (`sm_86`) and Ada (`sm_89`) GPUs, computing on the processor anywhere else;
   `STONE_GPU=off` and `STONE_GPU=require` work as on Windows. See the new guide, "Running code
   on the GPU".
-- Linux executables built with `--gpu` decide where each piece of arithmetic on lists runs. The
+- Linux executables with GPU code decide where each piece of arithmetic on lists runs. The
   compiler records what an element costs on the processor and on the GPU, the program measures
   its GPU's launch latency and transfer speed when it starts it (treating a GPU that fails this
   test as unusable), and a list too short to repay a launch never leaves the processor, at the
@@ -26,9 +28,9 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - Lists stay on the GPU across consecutive statements of arithmetic on lists and across the
   turns of a loop that only computes on them, and come back once, where the program next reads
   them; a zero divisor on the way still reports the interpreter's element and position.
-  `STONE_GPU_SIMULATE=1 stone build --gpu ...` builds a Linux program whose GPU is simulated on
+  `STONE_GPU_SIMULATE=1 stone build` builds a Linux program whose GPU is simulated on
   the processor, for testing this without one.
-- Windows executables built with `--gpu` make the same decisions as Linux ones: they measure
+- Windows executables with GPU code make the same decisions as Linux ones: they measure
   the GPU, keep short lists on the processor, and keep lists in the GPU's own memory across
   statements and loops that only compute on them. Their driver is now written in stone over
   `nvcuda.dll`, and has run on a GPU (a Turing `sm_75`). `STONE_GPU_SIMULATE=1` works for
@@ -57,6 +59,19 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Changed
 
+- `stone build` finds the machine's NVIDIA GPU itself (through `nvidia-smi`) and writes GPU
+  code for it, so `--gpu` is gone; `--no-gpu` builds a program that computes everything on the
+  processor. The first build on a machine measures the GPU's launch latency and transfer speed
+  once, by running a tiny program, and keeps the result under `STONE_HOME` (`gpu/`), keyed by
+  the GPU, its driver, stone's version, and the target. The executable carries the
+  measurement and each kernel's shortest list worth a launch, so it decides from its first
+  instruction, and a program whose lists are all short never starts the GPU's driver (on
+  Windows, a fifth of a second). A build for another machine, or finding no usable GPU (no
+  `nvidia-smi`, no driver, on Linux no `ptxas`), has no GPU code. `STONE_GPU_DEVICES=sm_75,sm_89`
+  names GPUs to write code for instead, for any target, and such a program measures its GPU
+  when it first launches a kernel, as does one run on a GPU of another compute capability.
+  `STONE_NVIDIA_SMI` names the `nvidia-smi` to run. GPU images are now version 5, with a 64-byte
+  header that holds the measurement.
 - Compiled slices with a step of 1 skip a division, and the runtime copies strings and bytes a
   word at a time rather than a byte at a time, so short slices, sums, and appends are faster.
 - A `str` or `bytes` parameter that a sum starts from as the whole value of a `ret` or an

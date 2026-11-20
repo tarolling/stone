@@ -323,10 +323,12 @@ pub fn lower_with(
         }
     }
     let main = Lowerer::new(&context, None);
+    let main_index = functions.len();
     functions.push(match tests {
         Some(tests) => main.test_main(tests),
         None => main.function(&[], &top_level)?,
     });
+    let mut prepared = false;
     // an instance can call other instances, and both instances and helpers can ask for the
     // helpers of the enums and structs their values hold, so this runs until none is left
     let (mut made, mut instanced, mut scanned) = (0, 0, 0);
@@ -369,7 +371,16 @@ pub fn lower_with(
         }
         let next = context.helpers.borrow().get(made).cloned();
         let Some(helper) = next else {
-            break;
+            // once every kernel is known, a program that launches any readies the planner
+            // before its first statement, which then lowers in turn
+            let launches = gpu_launch.launches() && !context.device_kernels.borrow().is_empty();
+            if prepared || !launches {
+                break;
+            }
+            prepared = true;
+            prepare_planner(&mut functions[main_index]);
+            scanned = main_index;
+            continue;
         };
         made += 1;
         let lowerer = Lowerer::new(&context, Some(helper.label()));
@@ -401,6 +412,30 @@ pub fn lower_with(
         device_kernels,
         tables,
     })
+}
+
+/// Makes `main` call the planner's `gpu_plan.prepare` first, which reads `STONE_GPU` and readies
+/// the table of each kernel's shortest list worth a launch before any arithmetic compares a
+/// length with it.
+///
+/// For example, `main`'s first instruction becomes `call fn.gpu_plan.prepare()`.
+fn prepare_planner(main: &mut Function) {
+    let Some(entry) = main.blocks.first_mut() else {
+        return;
+    };
+    let span = entry.spans.first().copied().unwrap_or(entry.term_span);
+    entry.insts.insert(
+        0,
+        Inst::Call {
+            dsts: vec![],
+            callee: Callee::Helper(function_label(&format!(
+                "{}.prepare",
+                crate::stdlib::gpu::PLAN_MODULE
+            ))),
+            args: vec![],
+        },
+    );
+    entry.spans.insert(0, span);
 }
 
 /// Returns the stone functions `function` calls directly or takes the address of, by their stone

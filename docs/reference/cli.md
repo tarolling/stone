@@ -83,7 +83,7 @@ stone run                                  # the project's main.stn
 stone run -- --verbose input.txt           # the same, with two arguments
 ```
 
-## `stone build [FILE...] [-o OUTPUT] [--target TARGET]... [--gpu GPU]... [--windows-gui] [--offline]`
+## `stone build [FILE...] [-o OUTPUT] [--target TARGET]... [--no-gpu] [--windows-gui] [--offline]`
 
 Compiles each program (each file, each directory's `main.stn`, or with neither the program the
 current directory is in) to a native executable in its build directory (see
@@ -102,23 +102,53 @@ machine; windows need Windows 10 version 1703 or later. The `net` module and `os
 supported there yet, so building a program that uses them for Windows is an error, and so is
 running or checking one on Windows.
 
-`--gpu` names a GPU, as its vendor names it (`sm_75`, `sm_90a`), to write kernels for: each
-piece of arithmetic on whole lists, such as `a * 2.0 + b`, becomes a kernel, and the kernels go
-next to each executable in a PTX file named after it and the GPU (`build/basics.sm_75.ptx`),
-which NVIDIA's driver compiles for the GPU it runs on. Give it more than once for several GPUs.
-Only NVIDIA GPUs from `sm_50` to `sm_120` are supported, so an AMD GPU such as `gfx1100` is an
-error. With NVIDIA's `ptxas` on `PATH` (or named by the `STONE_PTXAS` environment variable) the
-kernels are also compiled to machine code beside the PTX (`build/basics.sm_75.cubin`); without
-it, `stone build` warns and goes on, and a `ptxas` that rejects the kernels is an error.
+A build for the machine stone runs on finds its NVIDIA GPU by itself and writes kernels for it:
+each piece of arithmetic on whole lists, such as `a * 2.0 + b`, becomes a kernel, and the
+kernels go next to the executable in a PTX file named after it and the GPU
+(`build/basics.sm_75.ptx`). It asks `nvidia-smi` (or the program `STONE_NVIDIA_SMI` names) for
+the first GPU, and measures that GPU once, by building and running a tiny program of its own: how
+long a launch takes and how fast lists move to the GPU and back. It keeps what it found in
+`gpu/` under stone's home directory (`STONE_HOME`, else `~/.stone`, or `%LOCALAPPDATA%\stone`
+on Windows), one file per GPU, driver version, version of stone, and target, so later builds
+only ask `nvidia-smi`, and says so the one time it measures:
 
-A Windows executable built with `--gpu` runs its kernels on an NVIDIA GPU. It carries the PTX
-for every GPU it was built for, and the machine code when `ptxas` made it. When it first
-computes such a piece of arithmetic, it loads NVIDIA's driver, `nvcuda.dll`, from the system
-directory and picks code for the machine's first GPU: machine code made for a GPU of the same
-generation that is not newer than it, or else the newest PTX that is not newer than it, which
-the driver compiles. If nothing fits, or there is no driver or GPU, it computes everything on
-the processor, so the executable runs on any machine. The results are the same either way, and
-a zero divisor is still reported at the element and position `stone run` reports.
+```console
+$ stone build saxpy.stn
+note: measured the GPU, Quadro T1000 (sm_75), to decide where arithmetic on lists runs; later builds reuse it
+Compiled build/saxpy
+```
+
+The executable carries the measurements and, for each kernel, the shortest list worth a launch,
+so it knows from its first instruction which arithmetic to send to the GPU, and a program whose
+lists are all short never starts the GPU's driver. Run on a GPU of another compute capability,
+it measures that GPU when it first launches a kernel. A program with no arithmetic on lists has
+no GPU code.
+
+A build carries no GPU code at all with `--no-gpu`, for a target other than this machine (such
+as `--target x86_64-linux` from Windows; another level of the same processor still counts as
+this machine), for macOS, or when there is no usable GPU: no `nvidia-smi`, a GPU older than
+`sm_50`, a measurement that fails (`note: no GPU code: NVIDIA's driver is missing or
+unsupported`, kept like a measurement when it will not change), or, on Linux, no
+`/dev/nvidiactl` (as under WSL) or no `ptxas` (`note: no GPU code: cannot run 'ptxas' ...`),
+since Linux executables need machine code. The `STONE_GPU_DEVICES` environment variable names
+the GPUs to write kernels for instead, separated by commas (`STONE_GPU_DEVICES=sm_75,sm_90`, or
+empty for none), for any target; such a program measures its GPU when it first launches a
+kernel. Only NVIDIA GPUs from `sm_50` to `sm_120` are supported, so naming an AMD GPU such as
+`gfx1100` is an error.
+
+With NVIDIA's `ptxas` on `PATH` (or named by the `STONE_PTXAS` environment variable) the kernels
+are also compiled to machine code beside the PTX (`build/basics.sm_75.cubin`); a `ptxas` that
+rejects the kernels is an error. Without one, a build for GPUs `STONE_GPU_DEVICES` names warns
+and goes on.
+
+A Windows executable with GPU code runs its kernels on an NVIDIA GPU. It carries the PTX for
+every GPU it was built for, and the machine code when `ptxas` made it. When it first launches a
+kernel, it loads NVIDIA's driver, `nvcuda.dll`, from the system directory and picks code for the
+machine's first GPU: machine code made for a GPU of the same generation that is not newer than
+it, or else the newest PTX that is not newer than it, which the driver compiles. If nothing
+fits, or there is no driver or GPU, it computes everything on the processor, so the executable
+runs on any machine. The results are the same either way, and a zero divisor is still reported
+at the element and position `stone run` reports.
 
 The `STONE_GPU` environment variable changes this when the program runs: `off` computes
 everything on the processor, `always` launches every kernel whatever the length of its lists
@@ -128,11 +158,12 @@ the arithmetic instead, such as `no GPU ran this program's kernels: nvcuda.dll i
 too old`, `there is no CUDA device`, `it has no code for compute capability 8.6`, or `CUDA
 error 2`.
 
-With `STONE_GPU_SIMULATE` set, `stone build --gpu` for Linux or Windows makes a program whose
-GPU is simulated: it computes each kernel on the processor, as the GPU would, from a description
-the build carries, so tests reach every path a launch takes on a machine without a GPU.
+With `STONE_GPU_SIMULATE` set, a build for Linux or Windows with GPU code (from
+`STONE_GPU_DEVICES` or this machine's GPU) makes a program whose GPU is simulated: it computes
+each kernel on the processor, as the GPU would, from a description the build carries, so tests
+reach every path a launch takes on a machine without a GPU.
 
-A Linux executable built with `--gpu` runs the machine code `ptxas` made on an NVIDIA GPU too,
+A Linux executable with GPU code runs the machine code `ptxas` made on an NVIDIA GPU too,
 on x86-64 and arm64, without libcuda or any other library: it speaks to NVIDIA's kernel driver
 through `/dev/nvidiactl` and `/dev/nvidia0` itself. So far it knows the interface of driver
 version 595 and the GPUs of the Ampere (`sm_86`) and Ada (`sm_89`) generations; on any

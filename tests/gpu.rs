@@ -1,4 +1,4 @@
-//! Checks the PTX that `stone build --gpu` writes for every golden program.
+//! Checks the PTX that `stone build` writes for a GPU for every golden program.
 //!
 //! Every program's arithmetic on lists must become kernels that the PTX backend writes for
 //! every NVIDIA GPU it supports. When NVIDIA's `ptxas` is on `PATH`, each module must also

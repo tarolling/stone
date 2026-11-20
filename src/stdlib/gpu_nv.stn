@@ -1,4 +1,4 @@
-// The internal `gpu_nv` module, which a Linux program built with `--gpu` is linked with: it runs
+// The internal `gpu_nv` module, which a Linux program with GPU code is linked with: it runs
 // the kernels of the program's GPU image on an NVIDIA GPU, talking to the kernel driver through
 // its device files, with no C library and no CUDA library.
 //
@@ -65,8 +65,10 @@ const at_launch = 216
 const at_arena = 224
 const at_arena_size = 232
 
-// The version of the image's layout this module reads, and the size of a kernel's shape in it.
-const image_version = 4
+// The version of the image's layout this module reads, the size of its header, and the size of a
+// kernel's shape in it.
+const image_version = 5
+const header_size = 64
 const shape_size = 48
 
 // The number of GPFIFO entries in the channel's ring.
@@ -544,7 +546,7 @@ fn prepare(s: int, compute_class: int) -> result[int, int]:
 
 // Returns where the image's shapes start.
 fn shapes_at(image: int) -> int:
-    ret image + align(32 + 4 * gpu_sys.peek32(image + 16), 8)
+    ret image + align(header_size + 4 * gpu_sys.peek32(image + 16), 8)
 
 // Picks the newest machine code in the image that this GPU runs and copies all of it into GPU
 // memory once, keeping its kernel table and where its code went.
@@ -592,6 +594,12 @@ fn load_code(s: int) -> result[int, int]:
 ////////////////////////////////////////////////////////////////
 // starting
 ////////////////////////////////////////////////////////////////
+
+// Returns the compute capability times 10 of the GPU started with the state block `s`, such as
+// 75 for 7.5.
+pub fn capability(s: int) -> int:
+    sm = field(s, at_sm)
+    ret (sm >> 8) * 10 + (sm & 0xFF)
 
 // Returns what a launch gives once the GPU gave up with `state`: minus the refusal code under
 // `STONE_GPU=require`, else 0, so the processor computes instead.
@@ -734,7 +742,7 @@ fn run_placed(s: int, record: int, args: list[int], placed: int) -> result[int, 
     if args.len() < 2 or args[1] <= 0:
         ret ok(0)
     image = gpu_sys.image()
-    k = gpu_sys.peek32(image + 32 + 4 * record)
+    k = gpu_sys.peek32(image + header_size + 4 * record)
     shape = shapes_at(image) + shape_size * k
     count = gpu_sys.peek32(shape)
     fails = gpu_sys.peek32(shape + 4) & 1

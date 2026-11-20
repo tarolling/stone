@@ -1,9 +1,10 @@
 //! GPUs that a program's code may run on beside its [`Target`](super::Target).
 //!
 //! A device is not part of a target name, since one program may carry code for several GPUs: a
-//! build takes one target plus any number of devices, as in
-//! `stone build --target x86_64-linux --gpu sm_75 --gpu sm_90`. Only NVIDIA GPUs have a backend
-//! yet ([`gpu::ptx`](super::gpu::ptx)), and nothing launches its kernels.
+//! build takes one target plus any number of devices: the GPU of the machine it runs on, which
+//! `stone build` finds itself ([`gpu::detect`](super::gpu::detect)), or the ones
+//! `STONE_GPU_DEVICES` names, as in `STONE_GPU_DEVICES=sm_75,sm_90 stone build --target
+//! x86_64-linux`. Only NVIDIA GPUs have a backend yet ([`gpu::ptx`](super::gpu::ptx)).
 
 use std::fmt;
 use std::str::FromStr;

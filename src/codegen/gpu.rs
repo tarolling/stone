@@ -12,6 +12,7 @@
 pub mod compile;
 pub mod cost;
 pub mod cubin;
+pub mod detect;
 #[cfg(test)]
 mod eval;
 pub mod image;
@@ -43,7 +44,8 @@ impl Launch {
     }
 }
 
-/// The environment variable that makes a Linux `stone build --gpu` simulate its GPU, for tests.
+/// The environment variable that makes a Linux or Windows build with GPU code simulate its GPU,
+/// for tests.
 pub const SIMULATE: &str = "STONE_GPU_SIMULATE";
 
 /// The label of the table of each record's shortest list worth a launch, 8 bytes per record,
@@ -57,18 +59,24 @@ pub fn min_length_label(record: u32) -> String {
     format!("{MIN_LENGTHS}.{record}")
 }
 
-/// Returns the `.bss` text of the [`MIN_LENGTHS`] table of `records` records, each entry
-/// labeled by [`min_length_label`] and zero until the runtime fills it.
+/// Returns the text of the [`MIN_LENGTHS`] table of `records` records, each entry labeled by
+/// [`min_length_label`]: in `.data` holding `values`, the lengths a build that measured the GPU
+/// worked out, or else in `.bss`, zero until the runtime fills it.
 ///
 /// For example, two records give the table's label, then `stone.gpu_min_len.0:` and
-/// `stone.gpu_min_len.1:`, each before 8 zero bytes.
-pub fn min_length_table(records: usize) -> String {
-    let mut text = format!("\t.bss\n\t.p2align\t3\n{MIN_LENGTHS}:\n");
+/// `stone.gpu_min_len.1:`, each before 8 zero bytes, or each before a `.quad` of its value.
+pub fn min_length_table(records: usize, values: Option<&[i64]>) -> String {
+    let section = match values {
+        Some(_) => ".data",
+        None => ".bss",
+    };
+    let mut text = format!("\t{section}\n\t.p2align\t3\n{MIN_LENGTHS}:\n");
     for record in 0..records {
-        text.push_str(&format!(
-            "{}:\n\t.zero\t8\n",
-            min_length_label(record as u32)
-        ));
+        let entry = match values.and_then(|values| values.get(record)) {
+            Some(value) => format!("\t.quad\t{value}"),
+            None => "\t.zero\t8".to_string(),
+        };
+        text.push_str(&format!("{}:\n{entry}\n", min_length_label(record as u32)));
     }
     if records == 0 {
         text.push_str("\t.zero\t8\n");

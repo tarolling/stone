@@ -14,12 +14,20 @@ use crate::project::Sources;
 /// Returns the store's directory, from `STONE_HOME` or else the home directory, or `None` if
 /// neither is known.
 pub fn default_dir() -> Option<PathBuf> {
-    let home = match std::env::var_os("STONE_HOME") {
-        Some(home) if !home.is_empty() => PathBuf::from(home),
-        _ if cfg!(windows) => PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("stone"),
-        _ => PathBuf::from(std::env::var_os("HOME")?).join(".stone"),
-    };
-    Some(home.join("packages"))
+    Some(stone_home()?.join("packages"))
+}
+
+/// Returns the directory stone keeps what it downloads and measures in: `STONE_HOME`, else
+/// `~/.stone`, or `%LOCALAPPDATA%\stone` on Windows, or `None` if neither is known.
+///
+/// For example, with `STONE_HOME=/tmp/s`, packages go in `/tmp/s/packages` and what measuring a
+/// GPU found in `/tmp/s/gpu`.
+pub fn stone_home() -> Option<PathBuf> {
+    match std::env::var_os("STONE_HOME") {
+        Some(home) if !home.is_empty() => Some(PathBuf::from(home)),
+        _ if cfg!(windows) => Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("stone")),
+        _ => Some(PathBuf::from(std::env::var_os("HOME")?).join(".stone")),
+    }
 }
 
 /// Returns the host a source's packages come from, as `github.com`.

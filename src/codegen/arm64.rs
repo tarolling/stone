@@ -196,6 +196,10 @@ impl AssemblyGenerator for Arm64Generator {
         self.ctx.gpu_launch = launch;
     }
 
+    fn set_gpu_measured(&mut self, measured: Option<crate::codegen::gpu::detect::Measured>) {
+        self.ctx.gpu_measured = measured;
+    }
+
     fn set_tests(&mut self, tests: Vec<String>) {
         self.ctx.tests = Some(tests);
     }
@@ -696,7 +700,8 @@ impl Arm64Generator {
         let gpu = self.ctx.module_routines("stone.gpu_");
         if !gpu.is_empty() {
             let records = self.ctx.program.device_kernels.len();
-            gpu::gpu_sys_runtime(self, &gpu, records);
+            let lengths = self.ctx.min_lengths(self.target());
+            gpu::gpu_sys_runtime(self, &gpu, records, lengths.as_deref());
         }
         let random: Vec<&str> = [
             "stone.random_seed",

@@ -6,6 +6,8 @@ use crate::ast::{Expr, ExprKind, Mod};
 use crate::checker::{Analysis, Calls, TypeChecker};
 use crate::codegen::device::Device;
 use crate::codegen::gpu::compile::{CompileError, compile_cubin};
+use crate::codegen::gpu::detect::{self, Probed};
+pub use crate::codegen::gpu::detect::{Gpu, Measured};
 use crate::codegen::gpu::{cubin, image, ptx};
 use crate::codegen::ir::opt::Options;
 use crate::codegen::{self, Os, Subsystem, Target};
@@ -443,7 +445,9 @@ pub fn compile_for_with(
         Build {
             target,
             subsystem: Subsystem::Console,
-            devices: &[],
+            gpu: &Gpu::default(),
+            simulate: false,
+            quiet: false,
             tests: None,
             options,
         },
@@ -454,7 +458,13 @@ pub fn compile_for_with(
 struct Build<'a> {
     target: Target,
     subsystem: Subsystem,
-    devices: &'a [Device],
+    /// The GPUs to carry code for, and what the build measured of this machine's.
+    gpu: &'a Gpu,
+    /// Whether a program with GPU code simulates its GPU for tests, as
+    /// [`codegen::gpu::SIMULATE`] asks.
+    simulate: bool,
+    /// Whether to print no warning about the GPU code, as for the program that measures a GPU.
+    quiet: bool,
     /// The test functions of a build for `stone test`, or `None` for a program.
     tests: Option<Vec<String>>,
     options: Options,
@@ -462,7 +472,8 @@ struct Build<'a> {
 
 /// Compiles a checked module, such as one from [`load`], to a native executable for `target` at
 /// `output`, which on Windows is a program of `subsystem`, and writes the kernels of its
-/// arithmetic on lists for each of `devices` beside it ([`ptx_path`]). Nothing launches them yet.
+/// arithmetic on lists for each of `gpu`'s devices beside it ([`ptx_path`]), which the program
+/// runs on a GPU when it can, baking in what the build measured of this machine's GPU.
 ///
 /// For example, compiling for [`Target::ARM64_MACOS`] on an x86-64 Linux machine writes an arm64
 /// macOS executable, with no cross toolchain installed.
@@ -472,12 +483,14 @@ pub fn compile_module(
     output: &Path,
     target: Target,
     subsystem: Subsystem,
-    devices: &[Device],
+    gpu: &Gpu,
 ) -> Result<(), Box<dyn Error>> {
     let build = Build {
         target,
         subsystem,
-        devices,
+        gpu,
+        simulate: std::env::var_os(codegen::gpu::SIMULATE).is_some(),
+        quiet: false,
         tests: None,
         options: Options::from_env(),
     };
@@ -501,7 +514,9 @@ pub fn compile_tests(
     let build = Build {
         target,
         subsystem: Subsystem::Console,
-        devices: &[],
+        gpu: &Gpu::default(),
+        simulate: false,
+        quiet: false,
         tests: Some(tests),
         options: Options::from_env(),
     };
@@ -519,10 +534,13 @@ fn compile_with(
     let Build {
         target,
         subsystem,
-        devices,
+        gpu,
+        simulate,
+        quiet,
         tests,
         options,
     } = build;
+    let devices = &gpu.devices;
     let unsupported = unsupported(&checked.module, sources, target.os);
     if !unsupported.is_empty() {
         return Err(Box::new(Diagnostics(unsupported)));
@@ -530,6 +548,8 @@ fn compile_with(
     for device in devices {
         device.ptx_version()?;
     }
+    // a build for no GPU has no GPU code, even one that would simulate its GPU
+    let gpu_build = !devices.is_empty();
     let mut generator = target.generator();
     generator.set_sources(sources.clone());
     generator.set_analysis(Rc::clone(&checked.analysis));
@@ -539,21 +559,22 @@ fn compile_with(
         Os::Windows => Some(image::Carry::Modules),
         Os::MacOs => None,
     };
-    // a build can simulate its GPU for tests, which reach every path a GPU takes
-    let launch = if devices.is_empty() || carry.is_none() {
+    let launch = if !gpu_build || carry.is_none() {
         codegen::gpu::Launch::Never
-    } else if std::env::var_os(codegen::gpu::SIMULATE).is_some() {
+    } else if simulate {
         codegen::gpu::Launch::Simulated
     } else {
         codegen::gpu::Launch::Device
     };
     generator.set_gpu_launch(launch);
+    generator.set_gpu_measured(gpu.measured);
     if let Some(tests) = tests {
         generator.set_tests(tests);
     }
     generator.set_optimizer(options);
     let mut assembly = generator.assemble(&checked.module)?;
-    if !devices.is_empty() {
+    // a program with no arithmetic on lists has no kernels, and launches nothing
+    if gpu_build && !generator.device_kernels().is_empty() {
         let numbered = codegen::gpu::numbered(generator.device_kernels(), target)?;
         let mut embedded = Vec::new();
         for &device in devices {
@@ -567,12 +588,15 @@ fn compile_with(
                 }
                 Err(CompileError::Missing(message)) => {
                     match carry {
-                        // the driver compiles the PTX the program carries
+                        // the driver compiles the PTX the program carries, as it does for every
+                        // build that found its GPU itself, so only named GPUs hear of it
+                        Some(image::Carry::Modules) if quiet || gpu.measured.is_some() => {}
                         Some(image::Carry::Modules) => eprintln!(
                             "warning: {message}, so the GPU's driver compiles the PTX when the \
                              program runs"
                         ),
                         // without machine code the program computes on the processor
+                        _ if quiet => {}
                         _ => eprintln!("warning: {message}"),
                     }
                     None
@@ -589,7 +613,8 @@ fn compile_with(
                     match embeddable(&code, &numbered) {
                         Ok(()) => embedded.push(code),
                         // the program still computes on the processor, as it did before
-                        Err(reason) => eprintln!("warning: {reason}"),
+                        Err(reason) if !quiet => eprintln!("warning: {reason}"),
+                        Err(_) => {}
                     }
                 }
                 Some(image::Carry::Modules) => embedded.push(code),
@@ -597,12 +622,13 @@ fn compile_with(
             }
         }
         if let Some(carry) = carry {
-            let image = image::build(
+            let image = image::build_measured(
                 &numbered.record_kernel,
                 &numbered.shapes,
                 &numbered.programs,
                 &embedded,
                 carry,
+                gpu.measured.as_ref(),
             )?;
             assembly.push_str(&image::assembly(&image));
         }
@@ -667,6 +693,213 @@ pub fn ptx_path(output: &Path, device: Device) -> PathBuf {
 /// For example, `cubin_path(Path::new("build/basics"), sm_75)` is `build/basics.sm_75.cubin`.
 pub fn cubin_path(output: &Path, device: Device) -> PathBuf {
     output.with_extension(format!("{device}.cubin"))
+}
+
+/// How long the program that measures a GPU may run before the build gives the GPU up.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Returns the GPUs a build for `target` carries code for, and what it measured of this
+/// machine's GPU, or why the GPUs [`detect::DEVICES_VARIABLE`] names are not ones stone writes
+/// code for.
+///
+/// With `no_gpu`, and for macOS, whose programs compute on the processor, there are none. The
+/// variable, when set, names them (none when empty), and a program built for them measures the
+/// GPU when it first reaches one. Otherwise a build for this machine (at any level) carries code
+/// for the NVIDIA GPU `nvidia-smi` lists first, if measuring it once finds it usable, and bakes
+/// in what that found; the measurement is kept in `<stone home>/gpu/`, so later builds only ask
+/// `nvidia-smi`. A build for another machine, or one finding no usable GPU, has no GPU code.
+///
+/// For example, on a machine without `nvidia-smi`, `gpu_devices(Target::host()?, false)` is
+/// `Ok(Gpu::default())`, and with `STONE_GPU_DEVICES=sm_75` it gives `sm_75` alone.
+pub fn gpu_devices(target: Target, no_gpu: bool) -> Result<Gpu, String> {
+    if no_gpu || target.os == Os::MacOs {
+        return Ok(Gpu::default());
+    }
+    if let Some(value) = std::env::var_os(detect::DEVICES_VARIABLE) {
+        let devices = detect::forced_devices(&value.to_string_lossy())?;
+        return Ok(Gpu {
+            devices,
+            measured: None,
+        });
+    }
+    Ok(found_gpu(target).unwrap_or_default())
+}
+
+/// Returns the GPU code of a build for `target` for this machine's GPU, measuring the GPU unless
+/// an earlier build did, or `None`, printing why when it measured the GPU and found it unusable.
+fn found_gpu(target: Target) -> Option<Gpu> {
+    let host = Target::host().ok()?;
+    if (target.arch, target.os) != (host.arch, host.os) {
+        return None;
+    }
+    // Linux programs reach the GPU through the kernel driver's files, which WSL lacks
+    if target.os == Os::Linux && !Path::new("/dev/nvidiactl").exists() {
+        return None;
+    }
+    let smi = std::env::var_os(detect::SMI_VARIABLE).unwrap_or_else(|| "nvidia-smi".into());
+    let output = std::process::Command::new(smi)
+        .args(detect::SMI_QUERY)
+        .output()
+        .ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let line = text.lines().find(|line| !line.trim().is_empty())?;
+    let smi = detect::parse_smi(line)?;
+    let device = smi.device().ok()?;
+    device.ptx_version().ok()?;
+    // Linux programs carry machine code, which only ptxas makes
+    if target.os == Os::Linux
+        && let Err(message) = codegen::gpu::compile::ptxas_runs(device)
+    {
+        eprintln!("note: no GPU code: {message}");
+        return None;
+    }
+    let name = detect::cache_name(line, env!("CARGO_PKG_VERSION"), &target.to_string());
+    let home = crate::package::store::stone_home().map(|home| home.join("gpu"));
+    let cache = home.as_ref().map(|dir| dir.join(&name));
+    let cached = cache
+        .as_ref()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| Probed::parse(&text));
+    let probed = match cached {
+        Some(probed) => probed,
+        None => {
+            let probed = match probe(target, device, home.as_deref()) {
+                Ok(probed) => probed,
+                Err(reason) => {
+                    eprintln!("note: no GPU code: {reason}");
+                    return None;
+                }
+            };
+            if probed.lasts()
+                && let Some(path) = &cache
+            {
+                // a failure to keep it only means the next build measures again
+                let _ = keep_measurement(path, &probed);
+            }
+            match probed {
+                Probed::Measured(_) => eprintln!(
+                    "note: measured the GPU, {} ({device}), to decide where arithmetic on lists \
+                     runs; later builds reuse it",
+                    smi.name
+                ),
+                Probed::Refused(code) => {
+                    eprintln!("note: no GPU code: {}", detect::refusal_reason(code));
+                }
+            }
+            probed
+        }
+    };
+    match probed {
+        Probed::Measured(measured) => Some(Gpu {
+            devices: vec![device],
+            measured: Some(measured),
+        }),
+        Probed::Refused(_) => None,
+    }
+}
+
+/// Writes what measuring a GPU found to `path`, through a file of its own that it renames into
+/// place, so a build that reads it while another writes it never sees half of it.
+fn keep_measurement(path: &Path, probed: &Probed) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(dir)?;
+    let partial = path.with_extension(format!("{}.partial", std::process::id()));
+    std::fs::write(&partial, probed.text())?;
+    std::fs::rename(&partial, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&partial);
+    })
+}
+
+/// Measures this machine's GPU, which runs the code of `device`, by building the program
+/// [`crate::stdlib::gpu::PROBE_SOURCE`] for `target` into a directory of its own under `home`
+/// (else the system's temporary directory), running it for at most [`PROBE_TIMEOUT`], and
+/// reading what it prints, or gives why it could not.
+fn probe(target: Target, device: Device, home: Option<&Path>) -> Result<Probed, String> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    let entry = Path::new("gpu_probe.stn");
+    let required = [crate::stdlib::gpu::PLAN_MODULE];
+    let source = crate::stdlib::gpu::PROBE_SOURCE;
+    let linked = project::link_internal(entry, source, &MapSources::default(), &required);
+    let (sources, loaded) = check_linked(linked, &MapSources::default());
+    let checked =
+        loaded.map_err(|error| format!("the program that measures the GPU fails: {error}"))?;
+    let base = home.map_or_else(std::env::temp_dir, Path::to_path_buf);
+    let dir = base.join(format!(
+        "probe-{}-{}",
+        std::process::id(),
+        COUNT.fetch_add(1, Ordering::Relaxed)
+    ));
+    std::fs::create_dir_all(&dir)
+        .map_err(|error| format!("cannot make {}: {error}", dir.display()))?;
+    let result = build_and_run_probe(&checked, &sources, &dir, target, device);
+    let _ = std::fs::remove_dir_all(&dir);
+    result
+}
+
+/// Builds the checked program that measures a GPU into `dir` for `target` with code for
+/// `device`, runs it, and reads what it prints.
+fn build_and_run_probe(
+    checked: &Checked,
+    sources: &SourceMap,
+    dir: &Path,
+    target: Target,
+    device: Device,
+) -> Result<Probed, String> {
+    let exe = dir.join(match target.os {
+        Os::Windows => "probe.exe",
+        _ => "probe",
+    });
+    let gpu = Gpu {
+        devices: vec![device],
+        measured: None,
+    };
+    let build = Build {
+        target,
+        subsystem: Subsystem::Console,
+        gpu: &gpu,
+        simulate: false,
+        quiet: true,
+        tests: None,
+        options: Options::default(),
+    };
+    compile_with(checked, sources, &exe, build)
+        .map_err(|error| format!("the program that measures the GPU does not build: {error}"))?;
+    let mut child = std::process::Command::new(&exe)
+        .env_remove(codegen::gpu::VARIABLE)
+        .env_remove("STONE_LEAK_CHECK")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|error| format!("cannot run the program that measures the GPU: {error}"))?;
+    let started = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) if started.elapsed() > PROBE_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!(
+                    "measuring the GPU took more than {} seconds",
+                    PROBE_TIMEOUT.as_secs()
+                ));
+            }
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(5)),
+            Err(error) => return Err(format!("cannot wait for the GPU's measurement: {error}")),
+        }
+    }
+    let mut text = String::new();
+    if let Some(mut stdout) = child.stdout.take() {
+        use std::io::Read;
+        let _ = stdout.read_to_string(&mut text);
+    }
+    Probed::parse(&text).ok_or_else(|| {
+        format!(
+            "the program that measures the GPU printed {:?}",
+            text.trim()
+        )
+    })
 }
 
 /// The builtin functions a Windows program cannot use yet, by linked name.
@@ -1027,7 +1260,7 @@ u = net.connect_unix(\"/tmp/x\")
             &output,
             Target::X64_WINDOWS,
             Subsystem::Console,
-            &[],
+            &Gpu::default(),
         );
         assert!(built.is_err());
         assert!(!output.exists());

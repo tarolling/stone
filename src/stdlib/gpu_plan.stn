@@ -1,15 +1,18 @@
-// Decides where a program built with `--gpu` computes each piece of arithmetic on lists: on the
+// Decides where a program built with GPU code computes each piece of arithmetic on lists: on the
 // processor, or on a GPU, which pays for itself only when the time it saves on the elements
 // outweighs what reaching it costs. `stone build` records each kernel's cost per element on
-// either side in the image (bytes in and out, femtoseconds per element), and the first launch
-// starts the GPU, measures what this machine's GPU costs to reach (the latency of a launch and
-// the time per byte of moving lists to and from it), and works out for each kernel the shortest
-// list worth a launch. Compiled code compares each list's length with that minimum before it
-// calls `launch`, so a short list never pays for a call.
+// either side in the image (bytes in and out, femtoseconds per element). What this machine's
+// GPU costs to reach (the latency of a launch and the time per byte of moving lists to and from
+// it) is measured once: by `stone build` itself, which runs `measure` in a program of its own
+// and bakes the numbers and each kernel's shortest list worth a launch into the program it
+// builds, or, for a program built without them, by the first launch, which starts the GPU and
+// works the shortest lists out then. Compiled code compares each list's length with that minimum
+// before it calls `launch`, so a short list never pays for a call, nor for starting the GPU.
 //
 // `STONE_GPU` chooses: unset, the costs decide; `off`, the processor computes everything;
 // `always`, every kernel is launched whatever its length; `require`, as `always`, but a program
-// that cannot use a GPU stops with an error at the arithmetic.
+// that cannot use a GPU stops with an error at the arithmetic. `prepare`, which compiled code
+// calls before the program's first statement, reads it.
 //
 // Lists can also stay on the device. Compiled code brackets a region (a run of statements that
 // only compute on lists, or a loop whose body only does) with `begin` and `end`, and gives each
@@ -87,8 +90,10 @@ const probe_failed = 8
 // A length no list reaches, which keeps a kernel on the processor.
 const never = 0x7FFFFFFFFFFFFFFF
 
-// The version of the image's layout this module reads, and the size of a kernel's shape in it.
-const image_version = 4
+// The version of the image's layout this module reads, the size of its header, and the size of a
+// kernel's shape in it.
+const image_version = 5
+const header_size = 64
 const shape_size = 48
 
 // The most a launch may take to start and finish, and the least bandwidth, for a GPU that
@@ -135,15 +140,27 @@ fn keep(at: int, v: int):
 // Returns where the shape of the kernel that computes record `record` starts in the image.
 fn shape_of(record: int) -> int:
     image = gpu_sys.image()
-    shapes = image + ((32 + 4 * gpu_sys.peek32(image + 16) + 7) & ~7)
-    ret shapes + shape_size * gpu_sys.peek32(image + 32 + 4 * record)
+    shapes = image + ((header_size + 4 * gpu_sys.peek32(image + 16) + 7) & ~7)
+    ret shapes + shape_size * gpu_sys.peek32(image + header_size + 4 * record)
+
+// Returns whether the program's image is one this module reads.
+fn readable() -> bool:
+    image = gpu_sys.image()
+    ret gpu_sys.peek64(image) == 0x555047454E4F5453 and gpu_sys.peek32(image + 8) == image_version
+
+// Returns the compute capability times 10 of the GPU `stone build` measured for the program, or
+// 0 when it measured none.
+fn measured_sm() -> int:
+    if not readable():
+        ret 0
+    ret gpu_sys.peek32(gpu_sys.image() + 32)
 
 // Sets every record's shortest list worth a launch, as `mode` says: `never` when off, 1 when
-// every kernel is launched, and else what the costs and the probe give.
+// every kernel is launched, and else what the costs and the measurements give.
 fn fill(mode: int):
     image = gpu_sys.image()
     records = 0
-    if gpu_sys.peek64(image) == 0x555047454E4F5453 and gpu_sys.peek32(image + 8) == image_version:
+    if readable():
         records = gpu_sys.peek32(image + 16)
     table = gpu_sys.min_lengths()
     latency = field(at_latency)
@@ -168,10 +185,49 @@ fn stop(refused: int):
     keep(at_refused, refused)
     fill(mode_off)
 
-// Reads `STONE_GPU`, starts the GPU, measures it, and sets every kernel's shortest list.
-fn start():
+// Reads `STONE_GPU` before the program's first statement and readies the table of shortest
+// lists for it: every kernel kept on the processor when off, and every one launched whatever its
+// length when always launched. For the costs to decide, the table is the one `stone build` baked
+// in from what it measured of the GPU, whose measurements this keeps for regions, or else zeros,
+// so the first launch measures the GPU. It never starts the GPU.
+pub fn prepare():
     mode = mode_of(os.env("STONE_GPU").unwrap_or(""))
     keep(at_mode, mode)
+    if mode == mode_off:
+        stop(0)
+        ret
+    if measured_sm() > 0:
+        image = gpu_sys.image()
+        keep(at_latency, gpu_sys.peek64(image + 40))
+        keep(at_up, gpu_sys.peek64(image + 48))
+        keep(at_down, gpu_sys.peek64(image + 56))
+    // a simulated GPU is always there, and launching every kernel reaches every path
+    if mode == mode_always or mode == mode_require or gpu_sys.simulated():
+        fill(mode_always)
+
+// Measures this machine's GPU for `stone build`, which calls it from a program of its own, and
+// prints what it found: `ok`, the GPU's compute capability times 10, the latency of a launch,
+// and the times per byte of moving a list to it and back, in femtoseconds, or `none` and the
+// refusal code of a GPU that cannot be used.
+pub fn measure():
+    state = driver_open(1)
+    if state < 0:
+        print("none {-driver_refused(state)}")
+        ret
+    match driver_probe(state):
+        case ok(measured):
+            latency, up, down = measured
+            if plausible(latency, up, down):
+                print("ok {driver_capability(state)} {latency} {up} {down}")
+            else:
+                print("none {probe_failed}")
+        case err(code):
+            print("none {code}")
+
+// Starts the GPU on the first launch worth one, measures it unless `stone build` measured this
+// GPU, and sets every kernel's shortest list.
+fn start():
+    mode = field(at_mode)
     if mode == mode_off:
         stop(0)
         ret
@@ -182,7 +238,8 @@ fn start():
     else:
         start_device(mode)
 
-// Starts the GPU for `mode`, measures it, and sets every kernel's shortest list.
+// Starts the GPU for `mode`, measures it unless `stone build` measured a GPU of its capability,
+// whose measurements `prepare` kept, and sets every kernel's shortest list.
 fn start_device(mode: int):
     require = 0
     if mode == mode_require:
@@ -191,18 +248,20 @@ fn start_device(mode: int):
     if state < 0:
         stop(driver_refused(state))
         ret
-    match driver_probe(state):
-        case ok(measured):
-            latency, up, down = measured
-            if not plausible(latency, up, down):
-                stop(driver_give_up(state, probe_failed))
+    sm = measured_sm()
+    if sm == 0 or driver_capability(state) != sm:
+        match driver_probe(state):
+            case ok(measured):
+                latency, up, down = measured
+                if not plausible(latency, up, down):
+                    stop(driver_give_up(state, probe_failed))
+                    ret
+                keep(at_latency, latency)
+                keep(at_up, up)
+                keep(at_down, down)
+            case err(code):
+                stop(driver_give_up(state, code))
                 ret
-            keep(at_latency, latency)
-            keep(at_up, up)
-            keep(at_down, down)
-        case err(code):
-            stop(driver_give_up(state, code))
-            ret
     keep(at_started, 1)
     fill(mode)
 
@@ -217,6 +276,15 @@ fn driver_open(require: int) -> int:
         ret gpu_cuda.open(require)
     else:
         ret gpu_nv.open(require)
+
+// Returns the compute capability times 10 of the GPU the driver started with `state`.
+fn driver_capability(state: int) -> int:
+    if gpu_sys.simulated():
+        ret 0
+    elif gpu_sys.on_windows():
+        ret gpu_cuda.capability(state)
+    else:
+        ret gpu_nv.capability(state)
 
 // Returns what a launch gives once the driver gave up with `state`.
 fn driver_refused(state: int) -> int:
@@ -390,7 +458,8 @@ fn worth(first: int, last: int, inputs: int, outputs: int, n: int, trips: int) -
 // take `count` slots, as `worth` describes it, and gives 1 when it keeps lists on the device
 // and 0 when it does not. Every `begin` is followed by one `end`.
 pub fn begin(first: int, last: int, inputs: int, outputs: int, n: int, trips: int, count: int) -> int:
-    if field(at_started) == 0:
+    // without measurements, only a started GPU knows whether the region is worth it
+    if field(at_started) == 0 and field(at_latency) == 0:
         start()
     depth = field(at_depth)
     keep(at_depth, depth + 1)
@@ -401,9 +470,13 @@ pub fn begin(first: int, last: int, inputs: int, outputs: int, n: int, trips: in
         outer = gpu_sys.plan() + at_frames + frame_size * (depth - 1)
         base = gpu_sys.peek64(outer) + gpu_sys.peek64(outer + 8)
     f = gpu_sys.plan() + at_frames + frame_size * depth
-    keeps = field(at_started) == 1 and count > 0 and base + count <= max_slots
+    keeps = field(at_started) != 2 and count > 0 and base + count <= max_slots
     if keeps:
         keeps = worth(first, last, inputs, outputs, n, trips)
+    // with measurements, a region not worth it never starts the GPU
+    if keeps and field(at_started) == 0:
+        start()
+        keeps = field(at_started) == 1
     gpu_sys.poke64(f, base)
     if keeps:
         gpu_sys.poke64(f + 8, count)
@@ -533,18 +606,23 @@ fn launch_kept(f: int, record: int, args: list[int], residency: int) -> int:
 // Gives 1 when the GPU computed the result, 0 when the processor should, or
 // `-(kind + 16 * detail)` when `STONE_GPU=require` refuses to compute on the processor.
 pub fn launch(record: int, args: list[int], residency: int) -> int:
+    f = active_frame()
+    kept = residency != 0 and f >= 0
+    // a list shorter than the shortest the build found worth a launch never starts the GPU, as
+    // in a region that keeps nothing, whose launches compiled code makes whatever their length
+    if not kept and (args.len() < 2 or args[1] < gpu_sys.peek64(gpu_sys.min_lengths() + 8 * record)):
+        ret 0
     if field(at_started) == 0:
         start()
     if field(at_started) != 1:
         ret field(at_refused)
-    f = active_frame()
-    if residency != 0 and f >= 0:
+    if kept:
         ran = launch_kept(f, record, args, residency)
         if ran != 1:
             // the processor computes this from lists it must have back
             flush()
         ret ran
-    // the first call comes before any minimum is known
+    // starting a GPU the build did not measure works out the minimums only now
     if args.len() < 2 or args[1] < gpu_sys.peek64(gpu_sys.min_lengths() + 8 * record):
         ret 0
     if gpu_sys.simulated():

@@ -4,7 +4,6 @@ use std::error::Error;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use stone::codegen::device::Device;
 use stone::codegen::{Os, Subsystem, Target};
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver::{self, Checked, EntryUse};
@@ -80,13 +79,12 @@ enum Command {
         /// several; each target other than this machine builds into `build/<TARGET>/`.
         #[arg(long = "target", value_name = "TARGET", value_parser = str::parse::<Target>)]
         targets: Vec<Target>,
-        /// A GPU to write kernels for, named as its vendor names it, such as `sm_75`. Each
-        /// piece of arithmetic on lists becomes a kernel in `<output>.<GPU>.ptx`. Windows
-        /// programs run the kernels on an NVIDIA GPU when one is usable (`STONE_GPU=off` never,
-        /// `require` always), and others compute on the processor. Give it more than once for
-        /// several GPUs; only NVIDIA's are supported.
-        #[arg(long = "gpu", value_name = "GPU", value_parser = str::parse::<Device>)]
-        devices: Vec<Device>,
+        /// Computes everything on the processor, even on a machine with a GPU stone can use.
+        /// By default, a build for this machine finds its NVIDIA GPU, measures it once (the
+        /// results are kept in stone's home directory), and runs arithmetic on lists there
+        /// when that is faster. `STONE_GPU_DEVICES` names GPUs to write code for instead.
+        #[arg(long)]
+        no_gpu: bool,
         /// Builds Windows programs as programs with windows, which start with no console, so
         /// opening one from Explorer opens no console, and what it prints goes nowhere unless
         /// its output is redirected. Needs a Windows target.
@@ -206,8 +204,8 @@ enum ExecutionMode {
         output: Option<PathBuf>,
         /// What to build for, or the host if empty.
         targets: Vec<Target>,
-        /// The GPUs to write kernels for.
-        devices: Vec<Device>,
+        /// Whether to write no GPU code, even for a GPU this machine has.
+        no_gpu: bool,
         /// Whether Windows executables start with no console.
         windows_gui: bool,
         offline: bool,
@@ -278,14 +276,14 @@ fn main() -> ExitCode {
             files,
             output,
             targets,
-            devices,
+            no_gpu,
             windows_gui,
             offline,
         }) => ExecutionMode::Build {
             files,
             output,
             targets,
-            devices,
+            no_gpu,
             windows_gui,
             offline,
         },
@@ -359,7 +357,7 @@ fn main() -> ExitCode {
             files,
             output,
             targets,
-            devices,
+            no_gpu,
             windows_gui,
             offline,
         } => {
@@ -371,7 +369,7 @@ fn main() -> ExitCode {
                 &files,
                 output.as_deref(),
                 &targets,
-                &devices,
+                no_gpu,
                 subsystem,
                 offline,
             )
@@ -509,13 +507,14 @@ fn with_dashes_tip(mut error: clap::Error) -> clap::Error {
 ///
 /// For example, building `a.stn` and `b.stn` on an x86-64 Linux machine writes `build/a` and
 /// `build/b`, and adding `--target aarch64-macos` also writes `build/aarch64-macos/a` and
-/// `build/aarch64-macos/b`. Windows executables are programs of `subsystem`, and each GPU of
-/// `devices` gets a `.ptx` file beside each executable.
+/// `build/aarch64-macos/b`. Windows executables are programs of `subsystem`, and unless
+/// `no_gpu`, a build for this machine carries code for its GPU, with a `.ptx` file beside each
+/// executable (see [`driver::gpu_devices`]).
 fn build(
     files: &[String],
     output: Option<&Path>,
     targets: &[Target],
-    devices: &[Device],
+    no_gpu: bool,
     subsystem: Subsystem,
     offline: bool,
 ) -> ExitCode {
@@ -537,12 +536,33 @@ fn build(
         eprintln!("error: --windows-gui needs a Windows target, such as --target x86_64-windows");
         return ExitCode::FAILURE;
     }
-    for device in devices {
-        if let Err(message) = device.ptx_version() {
-            eprintln!("error: {message}");
-            return ExitCode::FAILURE;
+    // the GPU code of each target, decided once for every file, before loading, since a build
+    // with any links the planner
+    let mut gpus: Vec<(Target, driver::Gpu)> = Vec::new();
+    let planned = match unique.is_empty() {
+        true => Target::host().into_iter().collect(),
+        false => unique.clone(),
+    };
+    for target in planned {
+        match driver::gpu_devices(target, no_gpu) {
+            Ok(gpu) => gpus.push((target, gpu)),
+            Err(message) => {
+                eprintln!("error: {message}");
+                return ExitCode::FAILURE;
+            }
         }
     }
+    let no_gpu_code = driver::Gpu::default();
+    let gpu_of = |target: Target| {
+        gpus.iter()
+            .find(|(planned, _)| *planned == target)
+            .map_or(&no_gpu_code, |(_, gpu)| gpu)
+    };
+    // a build that launches kernels runs them through the planner and the GPU's driver, in stone
+    let required: &[&str] = match gpus.iter().any(|(_, gpu)| !gpu.devices.is_empty()) {
+        true => &[stone::stdlib::gpu::PLAN_MODULE],
+        false => &[],
+    };
     let mut status = ExitCode::SUCCESS;
     let named: Vec<Option<&str>> = match files.is_empty() {
         true => vec![None],
@@ -557,11 +577,6 @@ fn build(
             }
         };
         let file = &file;
-        // a build that launches kernels on Linux runs them through the GPU's driver, in stone
-        let required: &[&str] = match devices.is_empty() {
-            true => &[],
-            false => &[stone::stdlib::gpu::PLAN_MODULE],
-        };
         let code = with_program_requiring(file, offline, required, |checked, sources| {
             let targets = if unique.is_empty() {
                 vec![Target::host()?]
@@ -577,7 +592,8 @@ fn build(
                         driver::output_path(entry, target)
                     }
                 };
-                driver::compile_module(checked, sources, &path, target, subsystem, devices)?;
+                let gpu = gpu_of(target);
+                driver::compile_module(checked, sources, &path, target, subsystem, gpu)?;
                 println!("Compiled {}", path.display());
             }
             Ok(())

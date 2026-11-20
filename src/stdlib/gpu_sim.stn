@@ -20,7 +20,9 @@ const bit_and = 21
 const bit_or = 22
 const bit_xor = 23
 
-// The size of a kernel's shape in the image, and the flag of one that computes floats.
+// The size of the image's header, the size of a kernel's shape in it, and the flag of one that
+// computes floats.
+const header_size = 64
 const shape_size = 48
 const flag_float = 2
 
@@ -31,8 +33,8 @@ fn align(v: int, to: int) -> int:
 // Returns where the shape of the kernel that computes record `record` starts in the image.
 fn shape_of(record: int) -> int:
     image = gpu_sys.image()
-    shapes = image + align(32 + 4 * gpu_sys.peek32(image + 16), 8)
-    ret shapes + shape_size * gpu_sys.peek32(image + 32 + 4 * record)
+    shapes = image + align(header_size + 4 * gpu_sys.peek32(image + 16), 8)
+    ret shapes + shape_size * gpu_sys.peek32(image + header_size + 4 * record)
 
 // Reads the program of `size` bytes at `at` into its operations and, for each, the address of
 // the list an `element` reads or the bits of the number a `number` or `constant` pushes, from

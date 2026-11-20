@@ -319,7 +319,7 @@ match net.listen(\"127.0.0.1\", 0):
     case err(e):
         print(e)
 ";
-    // with the planner, which `--gpu` builds link and which drives the GPU through nvcuda.dll
+    // with the planner, which builds with GPU code link and which drives the GPU through nvcuda.dll
     let (_, module) = crate::driver::load_with(
         std::path::Path::new("main.stn"),
         source,
@@ -327,7 +327,7 @@ match net.listen(\"127.0.0.1\", 0):
         &[crate::stdlib::gpu::PLAN_MODULE],
     );
     let module = module.unwrap().module;
-    // built as `--gpu` builds, so the runtime launches the arithmetic on lists on a GPU
+    // built as builds with GPU code are, so the runtime launches the arithmetic on lists on a GPU
     let mut generator = crate::codegen::Target::X64_WINDOWS.generator();
     generator.set_gpu_launch(crate::codegen::gpu::Launch::Device);
     let mut assembly = generator.assemble(&module).unwrap();

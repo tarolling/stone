@@ -90,16 +90,17 @@ enum Backend {
     /// `stone build --target` for a level above the host's baseline, such as
     /// `x86_64v3-<system>`, whose arithmetic on lists uses wider vector instructions.
     Level(Leveled),
-    /// `stone build --gpu sm_75` for the host, whose arithmetic on lists first tries to launch a
-    /// kernel and, finding no GPU to launch it on, computes on the processor.
+    /// `stone build` for the host with `STONE_GPU_DEVICES=sm_75`, whose arithmetic on lists first
+    /// tries to launch a kernel and, finding no GPU to launch it on, computes on the processor.
     Gpu,
-    /// `stone build --gpu sm_<N>` for the host's own NVIDIA GPU, of compute capability `N` (89
-    /// for 8.9), run with `STONE_GPU=require`, so every kernel the GPU can run must run there
-    /// and print what the processor does.
-    GpuDevice(u32),
-    /// `stone build --gpu sm_75` for the host with `STONE_GPU_SIMULATE` set, so the runtime
-    /// computes each kernel on the processor as a GPU would, run with `STONE_GPU=require`, so
-    /// every kernel is launched and every path a launch takes is reached without a GPU.
+    /// `stone build` for the host's own NVIDIA GPU, which it finds and measures itself, run with
+    /// `STONE_GPU=require`, so every kernel the GPU can run must run there and print what the
+    /// processor does.
+    GpuDevice,
+    /// `stone build` for the host with `STONE_GPU_DEVICES=sm_75` and `STONE_GPU_SIMULATE` set, so
+    /// the runtime computes each kernel on the processor as a GPU would, run with
+    /// `STONE_GPU=require`, so every kernel is launched and every path a launch takes is reached
+    /// without a GPU.
     GpuSimulate,
     /// `stone build` for the host with `STONE_VERIFY_FACTS` set, so every check an optimizer
     /// pass removed on a proof is still made, and fails with `compiler bug` if the proof was
@@ -143,7 +144,7 @@ impl Backend {
             }) => "build-x86_64v4",
             Backend::Level(_) => "build-aarch64v9",
             Backend::Gpu => "build-gpu",
-            Backend::GpuDevice(_) => "build-gpu-device",
+            Backend::GpuDevice => "build-gpu-device",
             Backend::GpuSimulate => "build-gpu-simulate",
             Backend::Verify => "build-verify",
         }
@@ -409,7 +410,7 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
         | Backend::Windows(_)
         | Backend::Level(_)
         | Backend::Gpu
-        | Backend::GpuDevice(_)
+        | Backend::GpuDevice
         | Backend::GpuSimulate
         | Backend::Verify => {
             let suffix = match backend {
@@ -417,7 +418,7 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 Backend::Build
                 | Backend::Level(_)
                 | Backend::Gpu
-                | Backend::GpuDevice(_)
+                | Backend::GpuDevice
                 | Backend::GpuSimulate
                 | Backend::Verify => std::env::consts::EXE_SUFFIX,
                 _ => "",
@@ -427,6 +428,13 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 .join(format!("{}{suffix}", name_of(program)));
             let mut build = Command::new(stone);
             build.arg("build").arg(program).arg("-o").arg(&exe);
+            // only the GPU passes carry GPU code, so a machine with a GPU builds what CI does
+            if !matches!(
+                backend,
+                Backend::Gpu | Backend::GpuDevice | Backend::GpuSimulate
+            ) {
+                build.arg("--no-gpu");
+            }
             match backend {
                 Backend::Cross(arch) => {
                     build.arg("--target").arg(arch.to_string());
@@ -435,15 +443,16 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                     build.arg("--target").arg("x86_64-windows");
                 }
                 Backend::Gpu => {
-                    build.args(["--gpu", "sm_75"]);
+                    build.env("STONE_GPU_DEVICES", "sm_75");
                 }
-                Backend::GpuDevice(capability) => {
-                    build.arg("--gpu").arg(format!("sm_{capability}"));
+                Backend::GpuDevice => {
+                    // the build finds the GPU and measures it, as an ordinary build does
+                    build.env_remove("STONE_GPU_DEVICES");
                 }
                 Backend::GpuSimulate => {
                     // no machine code is needed, so no ptxas runs or warns
                     build
-                        .args(["--gpu", "sm_75"])
+                        .env("STONE_GPU_DEVICES", "sm_75")
                         .env("STONE_GPU_SIMULATE", "1")
                         .env("STONE_PTXAS", "/nonexistent/ptxas");
                 }
@@ -504,7 +513,7 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                     command.env("WSLENV", shared);
                     command
                 }
-                Backend::GpuDevice(_) | Backend::GpuSimulate => {
+                Backend::GpuDevice | Backend::GpuSimulate => {
                     let mut command = Command::new(&exe);
                     command.env("STONE_GPU", "require");
                     command
@@ -733,20 +742,45 @@ fn gpu_device_compiler_matches_expected() {
         eprintln!("skipped running kernels on a GPU: {ptxas} was not found");
         return;
     }
-    check_all(Backend::GpuDevice(capability));
+    // one build measures the GPU first, which every build of the pass then reuses
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("build-gpu-device");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = dir.join("measure.stn");
+    std::fs::write(&file, "a = [1.0, 2.0]\nprint(a * 2.0 + a)\n").unwrap();
+    let exe = dir.join(format!("measure{}", std::env::consts::EXE_SUFFIX));
+    let ptx = dir.join(format!("measure.sm_{capability}.ptx"));
+    let _ = std::fs::remove_file(&ptx);
+    let built = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .env_remove("STONE_GPU_DEVICES")
+        .output()
+        .unwrap();
+    assert!(built.status.success(), "{built:?}");
+    if !ptx.exists() {
+        eprintln!(
+            "skipped running kernels on a GPU: the build found no usable GPU: {}",
+            String::from_utf8_lossy(&built.stderr).trim()
+        );
+        return;
+    }
+    check_all(Backend::GpuDevice);
 }
 
-/// Returns the compute capability of the first GPU `nvidia-smi` lists, as one number.
+/// Returns the compute capability of the first GPU `nvidia-smi` lists, as one number, read as
+/// `stone build` reads it.
 ///
 /// For example, an RTX 4000 Ada reports `8.9`, which gives `89`.
 fn gpu_capability() -> Option<u32> {
+    use stone::codegen::gpu::detect;
     let output = Command::new("nvidia-smi")
-        .args(["--query-gpu=compute_cap", "--format=csv,noheader"])
+        .args(detect::SMI_QUERY)
         .output()
         .ok()?;
     let text = String::from_utf8(output.stdout).ok()?;
-    let (major, minor) = text.lines().next()?.trim().split_once('.')?;
-    Some(major.parse::<u32>().ok()? * 10 + minor.parse::<u32>().ok()?)
+    Some(detect::parse_smi(text.lines().next()?)?.sm)
 }
 
 /// Builds every program for x86-64 `v3` and runs it, on an x86-64 machine that reaches that level,

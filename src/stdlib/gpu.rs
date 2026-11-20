@@ -1,6 +1,6 @@
 //! The internal modules behind GPU kernels.
 //!
-//! A program built with `--gpu` runs its list arithmetic on an NVIDIA GPU when it can. The
+//! A program built with GPU code runs its list arithmetic on an NVIDIA GPU when it can. The
 //! planner, `gpu_plan.stn`, decides where each piece runs and which lists stay on the GPU, and
 //! drives one of two drivers, both written in stone and linked with every such build: on Linux,
 //! `gpu_nv.stn` talks to the kernel driver through `/dev/nvidiactl`, `/dev/nvidia-uvm`, and
@@ -14,20 +14,20 @@ use super::BuiltinDoc;
 /// The name of the driver module written in stone.
 pub const NV_MODULE: &str = "gpu_nv";
 
-/// The driver's stone source, which a build with `--gpu` links with the program.
+/// The driver's stone source, which a build with GPU code links with the program.
 pub const NV_SOURCE: &str = include_str!("gpu_nv.stn");
 
 /// The name of the Windows driver module written in stone, over `nvcuda.dll`.
 pub const CUDA_MODULE: &str = "gpu_cuda";
 
-/// The Windows driver's stone source, which a build with `--gpu` links with the program.
+/// The Windows driver's stone source, which a build with GPU code links with the program.
 pub const CUDA_SOURCE: &str = include_str!("gpu_cuda.stn");
 
 /// The name of the module, written in stone, that decides where each kernel runs and calls the
 /// driver.
 pub const PLAN_MODULE: &str = "gpu_plan";
 
-/// The planner's stone source, which a build with `--gpu` links with the program.
+/// The planner's stone source, which a build with GPU code links with the program.
 pub const PLAN_SOURCE: &str = include_str!("gpu_plan.stn");
 
 /// The name of the module, written in stone, that computes kernels on the processor as a GPU
@@ -36,6 +36,10 @@ pub const SIM_MODULE: &str = "gpu_sim";
 
 /// The simulator's stone source.
 pub const SIM_SOURCE: &str = include_str!("gpu_sim.stn");
+
+/// The program `stone build` runs to measure this machine's GPU, which prints what
+/// `gpu_plan.measure` found. It is a program of stone's own, so it may use the planner.
+pub const PROBE_SOURCE: &str = include_str!("gpu_probe.stn");
 
 /// The name of the internal module through which `gpu_nv.stn` reaches the system.
 pub const SYS_MODULE: &str = "gpu_sys";
@@ -243,6 +247,48 @@ mod tests {
     }
 
     #[test]
+    fn a_build_that_measured_the_gpu_works_out_what_the_planner_would() {
+        use crate::codegen::gpu::cost::min_length;
+        let costs = [0, 1, 60_000, 200_000, 1_680_000, 20_000_000];
+        let bytes = [0, 8, 16, 24];
+        let latencies = [0, 1, 9_000_000_000, 10_000_000_001, 50_000_000_000_000];
+        let transfers = [0, 1, 10, 80_000, 10_000_000];
+        let mut cases = Vec::new();
+        for &cpu in &costs {
+            for &gpu in &costs[..4] {
+                for &bytes_in in &bytes {
+                    for &latency in &latencies {
+                        for &up in &transfers {
+                            // a kernel's result is 8 bytes an element, and comes back as fast
+                            cases.push([cpu, gpu, bytes_in, 8, latency, up, up]);
+                        }
+                    }
+                }
+            }
+        }
+        // one interpreter for all, since linking the planner is the slow part
+        let linked = crate::project::link_with(
+            Path::new("main.stn"),
+            "print(1)\n",
+            &MapSources::default(),
+            &[super::PLAN_MODULE],
+        );
+        let analysis = crate::driver::analyze_linked(&linked);
+        let mut out = Vec::new();
+        let mut interpreter =
+            Interpreter::with_output(&mut out, Limits::DEFAULT).with_calls(analysis.calls());
+        for case in cases {
+            let args = case.iter().map(|&arg| Value::Int(arg)).collect();
+            let planned = interpreter
+                .call_function(&linked.module, "gpu_plan.min_length", args)
+                .unwrap();
+            let [cpu, gpu, bytes_in, bytes_out, latency, up, down] = case;
+            let baked = min_length(cpu, gpu, bytes_in, bytes_out, latency, up, down);
+            assert_eq!(int(planned), baked, "{case:?}");
+        }
+    }
+
+    #[test]
     fn a_probe_that_finds_a_slow_or_absent_gpu_makes_it_unusable() {
         let plausible = |args: [i64; 3]| match call_ints("plausible", &args) {
             Value::Bool(b) => b,
@@ -273,10 +319,33 @@ mod tests {
 
     #[test]
     fn the_planner_and_the_windows_driver_read_the_images_layout() {
-        use crate::codegen::gpu::image::{DEVICE_SIZE, SHAPE_SIZE, VERSION};
+        use crate::codegen::gpu::image::{DEVICE_SIZE, HEADER_SIZE, SHAPE_SIZE, VERSION};
         for source in [super::PLAN_SOURCE, super::CUDA_SOURCE] {
             assert!(source.contains(&format!("const image_version = {VERSION}\n")));
+        }
+        for source in [super::PLAN_SOURCE, super::CUDA_SOURCE, super::SIM_SOURCE] {
             assert!(source.contains(&format!("const shape_size = {SHAPE_SIZE}\n")));
+            assert!(source.contains(&format!("const header_size = {HEADER_SIZE}\n")));
+        }
+        // every module finds the records and shapes after the header
+        for source in [
+            super::PLAN_SOURCE,
+            super::CUDA_SOURCE,
+            super::SIM_SOURCE,
+            super::NV_SOURCE,
+        ] {
+            assert!(
+                !source.contains("image + 32"),
+                "a module reads past the old header"
+            );
+            assert!(
+                !source.contains("align(32 +"),
+                "a module reads past the old header"
+            );
+            assert!(
+                !source.contains("(32 + 4"),
+                "a module reads past the old header"
+            );
         }
         let source = super::CUDA_SOURCE;
         assert!(source.contains(&format!("const device_size = {DEVICE_SIZE}\n")));
